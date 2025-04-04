@@ -1,0 +1,12 @@
+{
+  "configurations": [
+    {
+      "includePath": [
+        "${workspaceFolder}/include/**",
+        "/home/aknen/.local/share/kiln/packages/akneni/sso_string/v0.0.4/include"
+      ],
+      "name": "Default"
+    }
+  ],
+  "version": 4
+}
