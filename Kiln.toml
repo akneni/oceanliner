@@ -2,12 +2,13 @@
 name = "oceanliner"
 version = "0.0.1"
 language = "c"
+build_type = ["Exe"]
 
 [build_options]
 compiler_path = "gcc"
 debug_flags = ["-g", "-O0", "-Wall", "-fsanitize=undefined"]
 release_flags = ["-Wall", "-O3"]
 
-[[dependnecy]]
-uri = "https://github.com/akneni/sso_string.git"
-version = "v0.0.4"
+[[dependency]]
+uri = "https://github.com/akneni/kiln_string.git"
+version = "v0.0.1"

@@ -5,7 +5,7 @@
 #include <string.h>
 #include <fcntl.h>
 
-#include "sso_string.h"
+#include "kiln_string.h"
 
 #include "../include/cluster.h"
 #include "../include/utils.h"
@@ -39,21 +39,21 @@ void init_cluster(Cluster* cluster) {
 	buffer[length] = '\0';
 	fclose(config_fp);
 
-	SsoString text = SsoString_from_cstr((char*) buffer);
+	KilnString text = KilnString_from_cstr((char*) buffer);
 
-	SsoString* addrs = NULL;
+	KilnString* addrs = NULL;
 	uint64_t addrs_length = 0;
-	SsoString_split(&text, "\n", addrs, &addrs_length);
-	SsoString_free(&text);
+	KilnString_split(&text, "\n", addrs, &addrs_length);
+	KilnString_free(&text);
 
 	for(uint64_t i = 0; i < addrs_length; i++) {
-		SsoString addr[2];
+		KilnString addr[2];
 
 		uint64_t addr_lenth = 2;
-		SsoString_split(&addrs[i], ":", &addr[0], &addr_lenth);
+		KilnString_split(&addrs[i], ":", &addr[0], &addr_lenth);
 
-		char* ip = SsoString_as_cstr(&addr[0]);
-		char* port = SsoString_as_cstr(&addr[1]);
+		char* ip = KilnString_as_cstr(&addr[0]);
+		char* port = KilnString_as_cstr(&addr[1]);
 
 		strncpy(cluster->addrs[cluster->length].ip, ip, ADDR_IP_LEN);
 		strncpy(cluster->addrs[cluster->length].port, port, ADDR_PORT_LEN);
@@ -61,14 +61,15 @@ void init_cluster(Cluster* cluster) {
 		cluster->fds[length] = -1;
 		cluster->length++;
 
-		SsoString_free(&addr[0]);
-		SsoString_free(&addr[1]);
+		KilnString_free(&addr[0]);
+		KilnString_free(&addr[1]);
 	}
 
 	for(uint64_t i = 0; i < addrs_length; i++) {
-		SsoString_free(&addrs[i]);
+		KilnString_free(&addrs[i]);
 	}
 	free(addrs);
+
 }
 
 
@@ -84,7 +85,7 @@ int main(int argc, char** argv) {
 		.length = 0,
 	};
 	
-	SsoString storage_path = SsoString_from_cstr(argv[2]);
+	KilnString storage_path = KilnString_from_cstr(argv[2]);
 
 	
 	init_cluster(&cluster);
@@ -97,6 +98,6 @@ int main(int argc, char** argv) {
 
 
 
-	SsoString_free(&storage_path);
+	KilnString_free(&storage_path);
 	return 0;
 }
