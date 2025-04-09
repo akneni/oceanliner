@@ -75,9 +75,12 @@ struct HashMapMetadata {
     - bytes 3264 - 4096 => Stores 13 slots for inline values stores that are 64 bytes each. 
 
 - **Rehashing** => TBD. 
+- Servicing GET, SET, and DELETE operations will have roughly n/2 threads working on this where n is the number of logical cores on our machine. 
+
 
 ## Handling Client Requests
 - We will have n threads handling client responses where n is the number of logical lores on our system. They will each have a buffer where they input the commands that they receive from clients. These commands will be 32 byte aligned. After 50 ms, we will consider this batch to be complete, and will start copying them over into a unified buffer. We can then surround this buffer with the correct headers, and replicate it to all follower nodes. After receiving a success message from the majority of our followers, we can simply dump this buffer into the append only log file as it's already in the correct format. 
+- This will have roughly n/2 threads working on this where n is the number of logical cores on our machine.  
 
 ## Network Protocol
 - Clients will send messages to the leader over UDP. This is because a process can only have 4096 files open (including TCP connections) at once. Since we're trying to create an extremely high throughput implementation of raft, it's likely that we will need to service more than 4K clients at a time. 
