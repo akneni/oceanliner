@@ -74,6 +74,8 @@ struct HashMapMetadata {
     - bytes 3200 - 3264 => Store packed bitmap of which inline value slots are taken. (we're only using 13 of the 64 bits here, maybe we can find a use for the remaining 51 bits?)
     - bytes 3264 - 4096 => Stores 13 slots for inline values stores that are 64 bytes each. 
 
+- **Rehashing** => TBD. 
+
 ## Handling Client Requests
 - We will have n threads handling client responses where n is the number of logical lores on our system. They will each have a buffer where they input the commands that they receive from clients. These commands will be 32 byte aligned. After 50 ms, we will consider this batch to be complete, and will start copying them over into a unified buffer. We can then surround this buffer with the correct headers, and replicate it to all follower nodes. After receiving a success message from the majority of our followers, we can simply dump this buffer into the append only log file as it's already in the correct format. 
 
