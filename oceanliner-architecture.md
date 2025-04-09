@@ -1,6 +1,11 @@
 # Ocean Liner
 - Ocean Liner provides a raft-replicated key value store. More specifically, the key value store will be `HashMap<String, Bytes>`; both the string and the bytes will be arbitrarily sized.  
 
+## Out Of Scope
+- Secure communication. All networking will happen over TCP/UDP (without authentication or encryption) in order to allow us to spend more time on throughput optimization. 
+- Log Compaction. This is necessary for long running systems, but not for this project. 
+- Handling disk corruption. This is also necessary for production systems, but is not extremely pressing for our proof of concept (especially as many disk controllers already implement checksum validation to some extent). 
+
 ## RSM State
 - The state that is maintained by an append only log file. 
 ```c
@@ -11,7 +16,7 @@ struct LogEntryHeader {
     uint64_t log_index;
     uint64_t command_length;  // The Length of all the commands in bytes. 
     uint8_t header_hash[24];  // Hash of the header. If the hashes don't line up, then we assume it was because of a partial write. 
-    uint8_t magic_number[16];    // A random constant that we use to ensure that the field in question is a header.
+    uint8_t magic_number[16];    // A random constant that we use to ensure that the 64 byte chunk in question is a header.
 }
 
 // header1 and header2 are copies of each other and allow us to iterate over our log file in forward or reverse order. 
@@ -29,8 +34,8 @@ struct {
 - The command log file will store the following entries. 
 ```c
 // Arbitrary length
-struct {
-    uint8_t command;        // (enum with SET, DELETE, etc.) (GET not included as it doesn't change state)
+struct Command {
+    uint8_t command;        // (enum with NOP, SET, DELETE, etc.) (GET not included as it doesn't change state)
     char key[...];          // Null terminated string
     uint64_t value_length;  // length of the value (note, the key string needs to be padded so that this field can be 8 byte aligned).
     uint8_t value[...];
@@ -43,7 +48,7 @@ struct {
 - A hashmap entry be stored as is shown below. The first 17 characters of the string will be stored inline (leaving space for the null terminator character). The `cmd_byte_offset` is the byte offset of the relevant SET command in the commands log file. We can get the fill key and value by following this byte offset.
 ```c
 // 32 bytes
-struct {
+struct HashMapEntry {
     uint64_t cmd_byte_offset;
     uint32_t key_length;        // Is this field is 0, then this slot is empty
     char string[18];
@@ -52,9 +57,9 @@ struct {
 }
 ```
 
-- The hashmap file will also store the following metadata. 
+- The hashmap file will also store the following metadata.
 ```c
-struct {
+struct HashMapMetadata {
     uint64_t last_committed_index;
     uint64_t last_committed_term;
     uint64_t num_slots;
@@ -63,12 +68,10 @@ struct {
 ```
 - We will also maintain an in-memory bloom filter to possibly skip disk reads.
 
-- **Possible Inline Value store optimization** => We group each slot into a page (4096 bytes).
+- **Inline Value store optimization** => We group each slot into a page (4096 bytes).
     - bytes 0 - 3200 => Store 100 KV slots (some of these slots may be unused in the last page to allow for power-of-2 sizing)
     - bytes 3200 - 3264 => Store packed bitmap of which inline value slots are taken. (we're only using 13 of the 64 bits here, maybe we can find a use for the remaining 51 bits?)
     - bytes 3264 - 4096 => Stores 13 slots for inline values stores that are 64 bytes each. 
 
-## Out Of Scope
-- Secure communication. All networking will happen over TCP/UDP (without authentication or encryption) in order to allow us to spend more time on throughput optimization. 
-- Log Compaction. This is necessary for long running systems, but not for this project. 
-- Handling disk corruption. This is also necessary for production systems, but is not extremely pressing for our proof of concept (especially as many disk controllers already implement checksum validation to some extent). 
+## Handling Client Requests
+- We will have n threads handling client responses where n is the number of logical lores on our system. They will each have a buffer where they input the commands that they receive from clients. These commands will be 32 byte aligned. After 50 ms, we will consider this batch to be complete, and will start copying them over into a unified buffer. We can then surround this buffer with the correct headers, and replicate it to all follower nodes. After receiving a success message from the majority of our followers, we can simply dump this buffer into the append only log file as it's already in the correct format. 
