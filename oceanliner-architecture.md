@@ -75,3 +75,28 @@ struct HashMapMetadata {
 
 ## Handling Client Requests
 - We will have n threads handling client responses where n is the number of logical lores on our system. They will each have a buffer where they input the commands that they receive from clients. These commands will be 32 byte aligned. After 50 ms, we will consider this batch to be complete, and will start copying them over into a unified buffer. We can then surround this buffer with the correct headers, and replicate it to all follower nodes. After receiving a success message from the majority of our followers, we can simply dump this buffer into the append only log file as it's already in the correct format. 
+
+## Raft Optimizations
+- Our implementation will include batching of AppendEntries requests to minimize the number of RPC calls and improve throughput.  Each batch of commands, once formed, is replicated in a single AppendEntries message. The `num_commands` and `command_length` fields in the log header are used to efficiently decode the batch during replay.
+
+ ```c
+ // Constructing a batch in memory before replication
+struct CommandBatch {
+    uint32_t num_commands;
+    uint64_t total_length;
+    uint8_t commands[MAX_COMMAND_BUFFER]; // dynamically filled
+};
+ ```
+- To further improve throughput, we will dynamically adjust the Raft election timeout using recent leader stability metrics. If no failures are detected for a period of time, the timeout increases to avoid unnecessary elections. If failure is suspected (e.g., missed heartbeats), the timeout will be shortened to ensure quick leader recovery.
+
+```c
+// Adaptive election timeout adjustment (pseudo-code)
+if (leaderStableFor >= STABLE_THRESHOLD) {
+    election_timeout = min(election_timeout * 2, MAX_TIMEOUT);
+} else if (missedHeartbeats >= HEARTBEAT_THRESHOLD) {
+    election_timeout = max(election_timeout / 2, MIN_TIMEOUT);
+}
+```
+- For additional performance, if time permits, we will explore compression of batched AppendEntries requests when bandwidth usage becomes a bottleneck and CPU remains underutilized. Similarly, we may implement command deduplication for SET commands that repeatedly target the same key in a batch.
+- To ensure efficient handling of GET requests, especially under high load, the fixed-length HashMap structure enables quick access to key metadata without scanning the full command log. The Bloom filter provides a fast, probabilistic way to skip disk lookups when a key is definitely not present.
+- Performance and correctness under failure will be tested across a range of hardware setups and workloads, and leader election patterns will be monitored to ensure adaptive timeout logic behaves as expected.
