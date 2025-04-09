@@ -5,6 +5,7 @@
 - Secure communication. All networking will happen over TCP/UDP (without authentication or encryption) in order to allow us to spend more time on throughput optimization. 
 - Log Compaction. This is necessary for long running systems, but not for this project. 
 - Handling disk corruption. This is also necessary for production systems, but is not extremely pressing for our proof of concept (especially as many disk controllers already implement checksum validation to some extent). 
+- Since our clients are sending commands via UDP, we're going to limit the size of each command to 1500 bytes (the max size of a UDP frame). This issue could be solved with a more advanced networking protocol, but that's out of scope for this assignment. 
 
 ## RSM State
 - The state that is maintained by an append only log file. 
@@ -76,6 +77,10 @@ struct HashMapMetadata {
 ## Handling Client Requests
 - We will have n threads handling client responses where n is the number of logical lores on our system. They will each have a buffer where they input the commands that they receive from clients. These commands will be 32 byte aligned. After 50 ms, we will consider this batch to be complete, and will start copying them over into a unified buffer. We can then surround this buffer with the correct headers, and replicate it to all follower nodes. After receiving a success message from the majority of our followers, we can simply dump this buffer into the append only log file as it's already in the correct format. 
 
+## Network Protocol
+- Clients will send messages to the leader over UDP. This is because a process can only have 4096 files open (including TCP connections) at once. Since we're trying to create an extremely high throughput implementation of raft, it's likely that we will need to service more than 4K clients at a time. 
+- The nodes in the cluster will communicate with each other using TCP. 
+
 ## Raft Optimizations
 - Our implementation will include batching of AppendEntries requests to minimize the number of RPC calls and improve throughput.  Each batch of commands, once formed, is replicated in a single AppendEntries message. The `num_commands` and `command_length` fields in the log header are used to efficiently decode the batch during replay.
 
@@ -100,3 +105,4 @@ if (leaderStableFor >= STABLE_THRESHOLD) {
 - For additional performance, if time permits, we will explore compression of batched AppendEntries requests when bandwidth usage becomes a bottleneck and CPU remains underutilized. Similarly, we may implement command deduplication for SET commands that repeatedly target the same key in a batch.
 - To ensure efficient handling of GET requests, especially under high load, the fixed-length HashMap structure enables quick access to key metadata without scanning the full command log. The Bloom filter provides a fast, probabilistic way to skip disk lookups when a key is definitely not present.
 - Performance and correctness under failure will be tested across a range of hardware setups and workloads, and leader election patterns will be monitored to ensure adaptive timeout logic behaves as expected.
+
