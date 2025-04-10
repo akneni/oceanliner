@@ -4,6 +4,7 @@
         "socket.h": "c",
         "utils.h": "c",
         "*.tcc": "c",
-        "random": "c"
+        "random": "c",
+        "inet.h": "c"
     }
 }
