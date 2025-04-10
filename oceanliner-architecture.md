@@ -72,7 +72,7 @@ struct HashMapMetadata {
 
 - **Inline Value store optimization** => We group each slot into a page (4096 bytes).
     - bytes 0 - 3200 => Store 100 KV slots (some of these slots may be unused in the last page to allow for power-of-2 sizing)
-    - bytes 3200 - 3264 => Store packed bitmap of which inline value slots are taken. (we're only using 13 of the 64 bits here, maybe we can find a use for the remaining 51 bits?)
+    - bytes 3200 - 3264 => Store packed bitmap of which inline value slots are taken. (we're only using 13 bits of the 64 bytes (512 bits) here, maybe we can find a use for the remaining bytes?)
     - bytes 3264 - 4096 => Stores 13 slots for inline values stores that are 64 bytes each. 
 
 - **Rehashing** => TBD. 

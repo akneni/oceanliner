@@ -9,6 +9,8 @@
 #define HASH_SEED 42
 #define DM_PAGE_SIZE 4096
 
+#define KEY_NUM_SLOTS 8
+
 typedef struct DiskMap {
 
     // Copies of metadata to ensure they stay in memory
