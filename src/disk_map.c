@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -57,26 +58,11 @@ static inline int64_t find_free_value_slot(uint64_t* value_bitmap) {
             return i;
         }
     }
-    -1;
+    return -1;
 }
 
 uint32_t hash(const char* key) {
     return murmur3_32((uint8_t*) key, strlen(key));
-}
-
-DiskMap DiskMap_init(const char* filepath) {
-    DiskMap map;
-
-    uint64_t num_slots = 1000;
-    uint64_t num_pages = (num_slots / 100) + 2;
-    
-    map.latches = (pthread_mutex_t*) malloc(num_pages * sizeof(pthread_mutex_t));
-
-    for(int i = 0; i < num_pages; i++) {
-        pthread_mutex_init(&map.latches[i], NULL);
-    }
-
-    return map;
 }
 
 static void __DiskMap_find_entry(
@@ -96,7 +82,7 @@ static void __DiskMap_find_entry(
 
     pthread_mutex_lock(&map->latches[page_idx + 1]);
 
-    uint8_t* page_ptr = (page_idx + 1) * DM_PAGE_SIZE;
+    uint8_t* page_ptr = map->data + ((page_idx + 1) * DM_PAGE_SIZE);
 
     for (int i = 0; i < KEY_NUM_SLOTS; i++) {
         uint64_t curr_slot_offset = (slot_offset+i) % 100;
@@ -112,7 +98,7 @@ static void __DiskMap_find_entry(
         }
 
         if (slot_ptr->key_length > 17) {
-            uint8_t* command = NULL;
+            uint8_t* command = &map->log_file[slot_ptr->cmd_byte_offset];
             char* log_key = (char*) (command + 1);
 
             res = strncmp(log_key, key, key_length);
@@ -157,7 +143,7 @@ static void __DiskMap_find_empty_slot(
 
     DiskMapEntry* first_empty_sp = NULL;
 
-    uint8_t* page_ptr = (page_idx + 1) * DM_PAGE_SIZE;
+    uint8_t* page_ptr = map->data + ((page_idx + 1) * DM_PAGE_SIZE);
 
     for (int i = 0; i < KEY_NUM_SLOTS; i++) {
         uint64_t curr_slot_offset = (slot_offset+i) % 100;
@@ -178,7 +164,7 @@ static void __DiskMap_find_empty_slot(
         }
 
         if (slot_ptr->key_length > 17) {
-            uint8_t* command = NULL;
+            uint8_t* command = &map->log_file[slot_ptr->cmd_byte_offset];
             char* log_key = (char*) (command + 1);
 
             res = strncmp(log_key, key, key_length);
@@ -187,7 +173,7 @@ static void __DiskMap_find_empty_slot(
             }
         }
 
-        // This is the correct slot!
+        // Found an existing key that we'll replace
         *page_ptr_output = page_ptr;
         *slot_ptr_output = slot_ptr;
         *page_idx_output = page_idx;
@@ -204,6 +190,24 @@ static void __DiskMap_find_empty_slot(
         *slot_ptr_output = first_empty_sp;
         *page_idx_output = page_idx;
     }
+}
+
+DiskMap DiskMap_init(const char* filepath, uint8_t* log_file) {
+    DiskMap map;
+
+    map.num_slots = 1000;
+    uint64_t num_pages = (map.num_slots / 100) + 2;
+    
+    map.log_file = log_file;
+    map.latches = (pthread_mutex_t*) malloc(num_pages * sizeof(pthread_mutex_t));
+
+    map.data = malloc((num_pages + 1) * DM_PAGE_SIZE);
+
+    for(int i = 0; i < num_pages; i++) {
+        pthread_mutex_init(&map.latches[i], NULL);
+    }
+
+    return map;
 }
 
 
@@ -231,8 +235,12 @@ int64_t DiskMap_get(const DiskMap* map, const char* key, uint8_t val_output_buff
         return (int64_t) slot_ptr->inline_value_len;
     }
     else {
-        uint8_t* command = NULL;
+        uint8_t* command = &map->log_file[slot_ptr->cmd_byte_offset];
+        
         uint8_t* log_value = (command + slot_ptr->key_length + 2);
+        uint64_t byte_diff = ((uint64_t) log_value) % 8;
+        log_value = (uint8_t*) (((uint64_t) log_value) + (8-byte_diff));
+
         uint64_t value_length = *((uint64_t*) log_value);
         log_value += 8;
 
@@ -251,21 +259,24 @@ int64_t DiskMap_get(const DiskMap* map, const char* key, uint8_t val_output_buff
 /// @param value 
 /// @param value_len 
 /// @return 
-int64_t DiskMap_set(DiskMap* map, const char* key, uint8_t* value, size_t value_len) {
+int64_t DiskMap_set(DiskMap* map, uint64_t cmd_byte_offset, const char* key, uint8_t* value, size_t value_len) {
     uint64_t page_idx = 0;
     uint8_t* page_ptr = NULL;
     DiskMapEntry* slot_ptr = NULL;
+
+    assert(strlen(key) < UINT32_MAX);
+    assert(value_len < VALUE_MAX_SIZE);
     
     __DiskMap_find_empty_slot(map, key, &page_idx, &page_ptr, &slot_ptr);
     if (page_ptr == NULL) {
         return -1;
     }
 
-    uint64_t command_byte_offset = 0; // TODO (get this value somehow)
     strncpy(slot_ptr->string, key, 17);
-    slot_ptr->string[18] = '\0';
+    slot_ptr->string[17] = '\0';
     slot_ptr->key_length = strlen(key);
     slot_ptr->inline_value_slot = UINT8_MAX;
+    slot_ptr->cmd_byte_offset = cmd_byte_offset;
 
     if (value_len <= 64) {
         uint64_t* inline_val_bitmap = (uint64_t*) (page_ptr + 3200);
@@ -274,7 +285,7 @@ int64_t DiskMap_set(DiskMap* map, const char* key, uint8_t* value, size_t value_
             slot_ptr->inline_value_slot = (uint8_t) inline_value_slot;
             slot_ptr->inline_value_len = (uint8_t) value_len;
 
-            uint8_t* value_slot_ptr = page_ptr + 3200 + 1 + inline_value_slot;
+            uint8_t* value_slot_ptr = page_ptr + INLINE_VALS_OFFSET + (inline_value_slot*64);
             memcpy(value_slot_ptr, value, value_len);
         }
     }
@@ -305,4 +316,42 @@ int64_t DiskMap_delete(DiskMap* map, const char* key) {
 
     pthread_mutex_unlock(&map->latches[page_idx + 1]);
     return 0;
+}
+
+
+
+/// @brief This is is to be used for debugging ONLY.
+/// @param map 
+void DiskMap_display_values(const DiskMap* map) {
+    assert(map->data != NULL);
+    
+    uint64_t counter = 0;
+    for(uint64_t page_idx = 1; page_idx < (map->num_slots / 100); page_idx++) {
+        uint8_t* page = &map->data[page_idx * DM_PAGE_SIZE];
+        assert(page != NULL);
+        
+        for (uint64_t slot_idx = 0; slot_idx < 100; slot_idx++) {
+            DiskMapEntry* entry = &((DiskMapEntry*) page)[slot_idx];
+            assert(entry != NULL);
+
+            if (entry->key_length != 0) {
+                counter++;
+
+                printf("[%lu] (%s) (", counter, entry->string);
+                if (entry->inline_value_slot == UINT8_MAX) {
+                    printf("no inline value)\n");
+                    continue;
+                }
+                
+                uint64_t iv_offset = INLINE_VALS_OFFSET + (entry->inline_value_slot * 64);
+                uint8_t* inline_value = page + iv_offset;
+
+                for(int i = 0; i < entry->inline_value_len; i++) {
+                    printf("%hu ", inline_value[i]);
+                }
+                printf(")\n");
+
+            }
+        }
+    }
 }

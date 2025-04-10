@@ -2,6 +2,7 @@
 #define CLUSTER_H
 
 #include <stdint.h>
+#include "globals.h"
 
 
 typedef struct Cluster {

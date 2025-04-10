@@ -1,0 +1,10 @@
+SET|user123|65,66,67,68
+SET|other_key|1,0,0,0
+SET|flag|1
+DELETE|temp_key
+SET|config|100,200,150,225
+SET|session_token|97,98,99,100,101,102
+DELETE|flag
+SET|counter|2,0,0,0
+SET|longkey_with_numbers123|255,255,255
+DELETE|user123

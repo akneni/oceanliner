@@ -5,6 +5,10 @@
         "utils.h": "c",
         "*.tcc": "c",
         "random": "c",
-        "inet.h": "c"
+        "inet.h": "c",
+        "stdio.h": "c",
+        "globals.h": "c",
+        "network.h": "c",
+        "string.h": "c"
     }
 }
