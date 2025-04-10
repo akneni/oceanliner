@@ -4,12 +4,13 @@
 #include <arpa/inet.h>
 
 #include "../include/utils.h"
+#include "../include/network.h"
 
 
 int32_t hl_connect(Addr* addr) {
     int32_t server_port = atoi(addr->port);
 
-    struct sockaddr_in server_addr;
+    
     memset(&server_addr, 0, sizeof(server_addr)); // Zero out all fields
     server_addr.sin_family = AF_INET;             // IPv4
     server_addr.sin_port = htons(server_port);    // Convert to network byte order
@@ -26,7 +27,7 @@ int32_t hl_connect(Addr* addr) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     
     for(int i = 0; i < 3; i++) {
-        res = connect(fd, (struct sockaddr*)&server_addr, sizeof(server_addr));
+        res = connect(fd, NULL, NULL);
         if (res > 0) {
             return res;
         }

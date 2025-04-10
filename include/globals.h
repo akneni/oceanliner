@@ -1,0 +1,1 @@
+#define VALUE_MAX_SIZE 1024

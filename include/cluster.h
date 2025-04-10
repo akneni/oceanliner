@@ -2,7 +2,7 @@
 #define CLUSTER_H
 
 #include <stdint.h>
-#include "utils.h"
+
 
 typedef struct Cluster {
     uint64_t length;

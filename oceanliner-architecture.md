@@ -5,7 +5,7 @@
 - Secure communication. All networking will happen over TCP/UDP (without authentication or encryption) in order to allow us to spend more time on throughput optimization. 
 - Log Compaction. This is necessary for long running systems, but not for this project. 
 - Handling disk corruption. This is also necessary for production systems, but is not extremely pressing for our proof of concept (especially as many disk controllers already implement checksum validation to some extent). 
-- Since our clients are sending commands via UDP, we're going to limit the size of each command to 1500 bytes (the max size of a UDP frame). This issue could be solved with a more advanced networking protocol, but that's out of scope for this assignment. 
+- Since our clients are sending commands via UDP, we're going to limit the size of each command to 1024 bytes (as not to overflow the max size of a UDP frame). This issue could be solved with a more advanced networking protocol, but that's out of scope for this assignment. 
 
 ## RSM State
 - The state that is maintained by an append only log file. 
@@ -58,8 +58,9 @@ struct HashMapEntry {
 }
 ```
 
-- The hashmap file will also store the following metadata.
+- The hashmap file will also store the following metadata in the first page. 
 ```c
+// 32 bytes
 struct HashMapMetadata {
     uint64_t last_committed_index;
     uint64_t last_committed_term;
@@ -67,7 +68,7 @@ struct HashMapMetadata {
     uint64_t num_entries;
 }
 ```
-- We will also maintain an in-memory bloom filter to possibly skip disk reads.
+- We will also maintain a bloom filter to possibly skip disk reads. This bloom filter will take up the remaining 4064 bytes in the first page. 
 
 - **Inline Value store optimization** => We group each slot into a page (4096 bytes).
     - bytes 0 - 3200 => Store 100 KV slots (some of these slots may be unused in the last page to allow for power-of-2 sizing)
