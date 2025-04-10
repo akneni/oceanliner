@@ -11,8 +11,10 @@
 #include "../include/globals.h"
 
 #define HASH_SEED 42
+
+#define KEY_NUM_SLOTS 16
+
 #define DM_PAGE_SIZE 4096
-#define KEY_NUM_SLOTS 8
 #define INLINE_VALS_OFFSET 3264
 
 typedef struct DiskMap {

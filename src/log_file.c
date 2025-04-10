@@ -15,8 +15,7 @@ uint64_t LogEntry_len(const uint8_t* log_entry) {
     ptr = jump_to_alignment(ptr, 8);
 
     int64_t key_padding = ((uint64_t) ptr) - orig_ptr;
-    assert(key_padding > 0);
-
+    
     uint64_t val_len = *((uint64_t*) ptr);
     ptr += (val_len + 8);
     
@@ -40,7 +39,6 @@ void LogEntry_get_value(const uint8_t* log_entry, uint8_t** value, uint64_t* val
     uint8_t* ptr = (((uint8_t*) log_entry) + 1);
     ptr += strlen((char*) ptr) + 1;
     ptr = jump_to_alignment(ptr, 8);
-
     *value_len = *((uint64_t*) ptr);
     *value = ptr + 8;
 }

@@ -78,6 +78,8 @@ static void __DiskMap_find_entry(
     uint64_t slot_idx = h % map->num_slots;
 
     uint64_t page_idx = slot_idx / 100;
+    *page_idx_output = page_idx;
+
     uint64_t slot_offset = slot_idx - (page_idx * 100);
 
     pthread_mutex_lock(&map->latches[page_idx + 1]);
@@ -92,7 +94,7 @@ static void __DiskMap_find_entry(
             continue;
         }
 
-        int res = strncmp(slot_ptr->string, key, 18);
+        int res = strncmp(slot_ptr->string, key, 17);
         if (res != 0) {
             continue;
         }
@@ -110,7 +112,6 @@ static void __DiskMap_find_entry(
         // This is the correct slot!
         *page_ptr_output = page_ptr;
         *slot_ptr_output = slot_ptr;
-        *page_idx_output = page_idx;
         return;
     }
 
@@ -137,6 +138,8 @@ static void __DiskMap_find_empty_slot(
     uint64_t slot_idx = h % map->num_slots;
 
     uint64_t page_idx = slot_idx / 100;
+    *page_idx_output = page_idx;
+
     uint64_t slot_offset = slot_idx - (page_idx * 100);
 
     pthread_mutex_lock(&map->latches[page_idx + 1]);
@@ -158,7 +161,7 @@ static void __DiskMap_find_empty_slot(
             continue;
         }
 
-        int res = strncmp(slot_ptr->string, key, 18);
+        int res = strncmp(slot_ptr->string, key, 17);
         if (res != 0) {
             continue;
         }
@@ -176,7 +179,6 @@ static void __DiskMap_find_empty_slot(
         // Found an existing key that we'll replace
         *page_ptr_output = page_ptr;
         *slot_ptr_output = slot_ptr;
-        *page_idx_output = page_idx;
         return;
     }
 
@@ -188,7 +190,6 @@ static void __DiskMap_find_empty_slot(
     else {
         *page_ptr_output = page_ptr;
         *slot_ptr_output = first_empty_sp;
-        *page_idx_output = page_idx;
     }
 }
 
@@ -201,7 +202,9 @@ DiskMap DiskMap_init(const char* filepath, uint8_t* log_file) {
     map.log_file = log_file;
     map.latches = (pthread_mutex_t*) malloc(num_pages * sizeof(pthread_mutex_t));
 
-    map.data = malloc((num_pages + 1) * DM_PAGE_SIZE);
+    size_t data_size = num_pages * DM_PAGE_SIZE;
+    map.data = malloc(data_size);
+    memset(map.data, 0, data_size);
 
     for(int i = 0; i < num_pages; i++) {
         pthread_mutex_init(&map.latches[i], NULL);
@@ -228,7 +231,7 @@ int64_t DiskMap_get(const DiskMap* map, const char* key, uint8_t val_output_buff
     }
 
     if (slot_ptr->inline_value_slot != UINT8_MAX) {
-        uint8_t* value_ptr = page_ptr + 3200 + 64 + (slot_ptr->inline_value_slot * 64);
+        uint8_t* value_ptr = page_ptr + INLINE_VALS_OFFSET + (slot_ptr->inline_value_slot * 64);
         memcpy(val_output_buffer, value_ptr, (size_t) slot_ptr->inline_value_len);
 
         pthread_mutex_unlock(&map->latches[page_idx + 1]);
@@ -251,6 +254,8 @@ int64_t DiskMap_get(const DiskMap* map, const char* key, uint8_t val_output_buff
         pthread_mutex_unlock(&map->latches[page_idx + 1]);
         return (int64_t) value_length;
     }
+
+    assert(false);
 }
 
 /// @brief 
@@ -264,17 +269,24 @@ int64_t DiskMap_set(DiskMap* map, uint64_t cmd_byte_offset, const char* key, uin
     uint8_t* page_ptr = NULL;
     DiskMapEntry* slot_ptr = NULL;
 
-    assert(strlen(key) < UINT32_MAX);
+    size_t key_length = strlen(key);
+
+    assert(key_length < UINT32_MAX);
+    assert(key_length > 0);
     assert(value_len < VALUE_MAX_SIZE);
     
     __DiskMap_find_empty_slot(map, key, &page_idx, &page_ptr, &slot_ptr);
     if (page_ptr == NULL) {
+        perror("failed to find slot.\n");
+        exit(1);
+        pthread_mutex_unlock(&map->latches[page_idx + 1]);
         return -1;
     }
+    assert(slot_ptr != NULL);
 
     strncpy(slot_ptr->string, key, 17);
     slot_ptr->string[17] = '\0';
-    slot_ptr->key_length = strlen(key);
+    slot_ptr->key_length = key_length;
     slot_ptr->inline_value_slot = UINT8_MAX;
     slot_ptr->cmd_byte_offset = cmd_byte_offset;
 
@@ -305,6 +317,7 @@ int64_t DiskMap_delete(DiskMap* map, const char* key) {
     
     __DiskMap_find_entry(map, key, &page_idx, &page_ptr, &slot_ptr);
     if (page_ptr == NULL) {
+        pthread_mutex_unlock(&map->latches[page_idx + 1]);
         return -1;
     }
 
@@ -326,7 +339,7 @@ void DiskMap_display_values(const DiskMap* map) {
     assert(map->data != NULL);
     
     uint64_t counter = 0;
-    for(uint64_t page_idx = 1; page_idx < (map->num_slots / 100); page_idx++) {
+    for(uint64_t page_idx = 1; page_idx < (map->num_slots / 100) + 1; page_idx++) {
         uint8_t* page = &map->data[page_idx * DM_PAGE_SIZE];
         assert(page != NULL);
         

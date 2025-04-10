@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stddef.h>
+#include <time.h>
 
 #include "../include/globals.h"
 #include "../include/cluster.h"
@@ -14,16 +15,19 @@ size_t calculate_padding(size_t offset) {
     return ((offset + 7) & ~7) - offset;
 }
 
-void load_data(char* filepath, uint8_t* buffer, size_t buffer_len) {
+uint64_t load_data(char* filepath, uint8_t* buffer, size_t buffer_len) {
     FILE* file = fopen(filepath, "r");
     if (file == NULL) {
         fprintf(stderr, "Error opening file: %s\n", filepath);
         exit(1);
     }
 
-    char line[1024]; // Assuming maximum line length is 1024 characters
+    size_t max_line_length = 1 << 16;
+
+    char line[max_line_length]; // Assuming maximum line length is 1024 characters
     uint8_t* current_buffer = buffer;
     size_t remaining_buffer = buffer_len;
+    uint64_t num_commands = 0;
 
     while (fgets(line, sizeof(line), file) != NULL) {
         // Remove newline character if present
@@ -93,12 +97,12 @@ void load_data(char* filepath, uint8_t* buffer, size_t buffer_len) {
         size_t padding = calculate_padding(offset_after_key);
         
         // Parse values if present
-        uint8_t value[1024]; // Assuming maximum number of values is 1024
+        uint8_t value[max_line_length]; // Assuming maximum number of values is 1024
         size_t value_len = 0;
         
         if (value_str != NULL && command == SC_SET) {
             // Make a copy of the value string for parsing
-            char value_str_copy[1024];
+            char value_str_copy[max_line_length];
             strcpy(value_str_copy, value_str);
             
             // Parse the comma-separated values
@@ -160,45 +164,114 @@ void load_data(char* filepath, uint8_t* buffer, size_t buffer_len) {
             current_buffer += value_len;
         }
 
+        current_buffer = jump_to_alignment(current_buffer, 8);
+        num_commands += 1;
+
         // Update remaining buffer
-        remaining_buffer -= entry_size;
+        remaining_buffer -= (entry_size + 7);
     }
 
     fclose(file);
+    return num_commands;
 }
+
+void DiskMap_assert_unlocked(const DiskMap* map) {
+    uint64_t num_locks = (map->num_slots / 100) + 2;
+    for(int i = 0; i < num_locks; i++) {
+        int res = pthread_mutex_trylock(&map->latches[i]);
+        assert(res == 0);
+        pthread_mutex_unlock(&map->latches[i]);
+    }
+}
+
+
+uint64_t DiskMap_count_entries(const DiskMap* map) {
+    assert(map->data != NULL);
+    uint64_t num_entries = 0;
+
+    for(uint64_t page_idx = 1; page_idx < (map->num_slots / 100) + 2; page_idx++) {
+        uint8_t* page = &map->data[page_idx * DM_PAGE_SIZE];
+        assert(page != NULL);
+        
+        for (uint64_t slot_idx = 0; slot_idx < 100; slot_idx++) {
+            DiskMapEntry* entry = &((DiskMapEntry*) page)[slot_idx];
+            assert(entry != NULL);
+
+            if (entry->key_length != 0) {
+                num_entries++;
+            }
+        }
+    }
+
+    assert(num_entries <= map->num_slots);
+    return num_entries;
+}
+
 
 int main() {
     uint64_t buffer_len = 10000000;
     uint8_t* log_file = malloc(buffer_len);
-    load_data("assets/log-file-example-1.txt", log_file, buffer_len);
+    uint64_t num_commands = load_data("assets/log-file-example-rand.txt", log_file, buffer_len);
 
     DiskMap map = DiskMap_init('--', log_file);
+    uint64_t log_file_start = (uint64_t) log_file;
 
-    for(int i = 0; i < 2; i++) {
+    time_t start_time = clock();
+
+    for(int i = 0; i < num_commands; i++) {
+        StateCommand cmd = LogEntry_get_cmd(log_file);
+
         char* s = LogEntry_get_key(log_file);
         assert(s != NULL);
     
+        printf("i = %d\n", i+1);
+        DiskMap_assert_unlocked(&map);
+
         printf("(%s)\n", s);
     
         uint8_t* value;
-        uint64_t value_len;
+        uint64_t value_len = 0;
+
         LogEntry_get_value(log_file, &value, &value_len);
         
+        printf("Value length: %lu\n", value_len);
         assert(value_len < 1024);
 
         printf("[ ");
-        for(int i = 0; i < value_len; i++) {
+        for(int i = 0; i < (value_len & 0xF); i++) {
             printf("%hu ", value[i]);
         }
-        printf("]\n\n\n");
+        printf("]\n");
     
-        log_file += LogEntry_len(log_file);        
+        if (cmd == SC_SET) {
+            printf("SET\n");
+            uint64_t cmd_offset = ((uint64_t) log_file) - log_file_start;
+            int64_t res = DiskMap_set(&map, cmd_offset, s, value, value_len);
+            assert(res >= 0);
+        }
+        else if (cmd == SC_DELETE) {
+            printf("DELETE\n");
+            int64_t res = DiskMap_delete(&map, s);
+            // assert(res >= 0);
+        }
+        else {
+            perror("bad command");
+            exit(1);
+        }
+
+        uint64_t num_entries = DiskMap_count_entries(&map);
+        printf("number of entries: %lu\n", num_entries);
+
+        log_file += LogEntry_len(log_file);
+        log_file = jump_to_alignment(log_file, 8);
+        printf("\n\n\n");
     }
 
+    time_t end_time = clock();
+    printf("time elapsed: %f\n", ((double) end_time - (double) start_time) / (double) CLOCKS_PER_SEC);
 
-
-
-
+    printf("--\n");
+    DiskMap_display_values(&map);
 
     return 0;
 }
