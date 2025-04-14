@@ -8,6 +8,7 @@
 
 #include "../include/globals.h"
 #include "../include/disk_map.h"
+#include "../include/log_file.h"
 
 
 static inline uint32_t murmur_32_scramble(uint32_t k) {
@@ -90,20 +91,29 @@ static void __DiskMap_find_entry(
         uint64_t curr_slot_offset = (slot_offset+i) % 100;
         DiskMapEntry* slot_ptr = (DiskMapEntry*) (page_ptr + (curr_slot_offset * sizeof(DiskMapEntry)));
 
+        if (h != slot_ptr->key_hash) {
+            continue;
+        }
+
         if ((size_t) slot_ptr->key_length != key_length) {
             continue;
         }
 
-        int res = strncmp(slot_ptr->string, key, 17);
-        if (res != 0) {
-            continue;
+        // Final key comparision 
+        if (slot_ptr->inline_kv_slot != UINT8_MAX) {
+            char* log_key = page_ptr + (INLINE_VALS_OFFSET + slot_ptr->inline_kv_slot * 127 + slot_ptr->inline_value_len);
+            char* res = strncmp(log_key, key, key_length);
+            if (res != 0) {
+                continue;
+            }
         }
-
-        if (slot_ptr->key_length > 17) {
-            uint8_t* command = &map->log_file[slot_ptr->cmd_byte_offset];
+        else {
+            uint8_t command[4096];
+            LogFile_get_data(slot_ptr->cmd_byte_offset, command, 4096);
+            
             char* log_key = (char*) (command + 1);
 
-            res = strncmp(log_key, key, key_length);
+            char* res = strncmp(log_key, key, key_length);
             if (res != 0) {
                 continue;
             }
@@ -167,9 +177,10 @@ static void __DiskMap_find_empty_slot(
         }
 
         if (slot_ptr->key_length > 17) {
-            uint8_t* command = &map->log_file[slot_ptr->cmd_byte_offset];
+            uint8_t command[4096];
+            LogFile_get_data(slot_ptr->cmd_byte_offset, command, 4096);
+            
             char* log_key = (char*) (command + 1);
-
             res = strncmp(log_key, key, key_length);
             if (res != 0) {
                 continue;
@@ -213,7 +224,6 @@ DiskMap DiskMap_init(const char* filepath, uint8_t* log_file) {
     return map;
 }
 
-
 /// @brief 
 /// @param map 
 /// @param key 
@@ -230,15 +240,17 @@ int64_t DiskMap_get(const DiskMap* map, const char* key, uint8_t val_output_buff
         return -1;
     }
 
-    if (slot_ptr->inline_value_slot != UINT8_MAX) {
-        uint8_t* value_ptr = page_ptr + INLINE_VALS_OFFSET + (slot_ptr->inline_value_slot * 64);
+    if (slot_ptr->inline_kv_slot != UINT8_MAX) {
+        uint8_t* value_ptr = page_ptr + INLINE_KV_OFFSET + (slot_ptr->inline_kv_slot * 64);
         memcpy(val_output_buffer, value_ptr, (size_t) slot_ptr->inline_value_len);
 
         pthread_mutex_unlock(&map->latches[page_idx + 1]);
         return (int64_t) slot_ptr->inline_value_len;
     }
     else {
-        uint8_t* command = &map->log_file[slot_ptr->cmd_byte_offset];
+        // uint8_t* command = &map->log_file[slot_ptr->cmd_byte_offset];
+        uint8_t command[4096];
+        LogFile_get_data(slot_ptr->cmd_byte_offset, command, 4096);
         
         uint8_t* log_value = (command + slot_ptr->key_length + 2);
         uint64_t byte_diff = ((uint64_t) log_value) % 8;
@@ -297,7 +309,7 @@ int64_t DiskMap_set(DiskMap* map, uint64_t cmd_byte_offset, const char* key, uin
             slot_ptr->inline_value_slot = (uint8_t) inline_value_slot;
             slot_ptr->inline_value_len = (uint8_t) value_len;
 
-            uint8_t* value_slot_ptr = page_ptr + INLINE_VALS_OFFSET + (inline_value_slot*64);
+            uint8_t* value_slot_ptr = page_ptr + INLINE_KV_OFFSET + (inline_value_slot*64);
             memcpy(value_slot_ptr, value, value_len);
         }
     }
@@ -356,7 +368,7 @@ void DiskMap_display_values(const DiskMap* map) {
                     continue;
                 }
                 
-                uint64_t iv_offset = INLINE_VALS_OFFSET + (entry->inline_value_slot * 64);
+                uint64_t iv_offset = INLINE_KV_OFFSET + (entry->inline_value_slot * 64);
                 uint8_t* inline_value = page + iv_offset;
 
                 for(int i = 0; i < entry->inline_value_len; i++) {

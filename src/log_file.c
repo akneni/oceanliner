@@ -1,6 +1,8 @@
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
+#include <fcntl.h>
 #include "../include/log_file.h"
 #include "../include/globals.h"
 
@@ -43,3 +45,15 @@ void LogEntry_get_value(const uint8_t* log_entry, uint8_t** value, uint64_t* val
     *value = ptr + 8;
 }
 
+
+void LogFile_get_data(uint64_t cmd_offset, uint8_t* out_buffer, size_t length) {
+    char* fname = "assets/log-file-example-rand.bin";
+
+    FILE* fp = fopen(fname, "r");
+
+    fseek(fp, cmd_offset, 0);
+
+    fread(out_buffer, 1, length, fp);
+    
+    fclose(fp);
+}

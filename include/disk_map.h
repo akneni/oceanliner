@@ -12,10 +12,11 @@
 
 #define HASH_SEED 42
 
+// Number of slots to check in a SET op before triggering a rehash
 #define KEY_NUM_SLOTS 16
 
 #define DM_PAGE_SIZE 4096
-#define INLINE_VALS_OFFSET 3264
+#define INLINE_VALS_OFFSET 2050
 
 typedef struct DiskMap {
 
@@ -37,11 +38,12 @@ typedef struct DiskMap {
 
 typedef struct DiskMapEntry {
     uint64_t cmd_byte_offset;
-    uint32_t key_length;        // Is this field is 0, then this slot is empty
-    char string[18];
-    uint8_t inline_value_slot;  // UINT8_MAX if value is not inlined
+    uint32_t key_hash;
+    uint16_t key_length;        // Is this field is 0, then this slot is empty
+    uint8_t inline_kv_slot;     // UINT8_MAX if value is not inlined
     uint8_t inline_value_len;
 } DiskMapEntry;
+
 
 
 uint32_t hash(const char* key);

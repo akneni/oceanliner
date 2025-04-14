@@ -10,7 +10,7 @@
 ## RSM State
 - The state that is maintained by an append only log file. 
 ```c
-// 64 bytes
+// 64 bytes (8 byte aligned)
 struct LogEntryHeader {
     uint32_t term;
     uint32_t num_commands; // The number of commands stored at this log index (this allows us to batch appendEntries calls)
@@ -34,9 +34,9 @@ struct {
 
 - The command log file will store the following entries. 
 ```c
-// Arbitrary length
+// Arbitrary length (8 byte aligned)
 struct Command {
-    uint8_t command;        // (enum with NOP, SET, DELETE, etc.) (GET not included as it doesn't change state)
+    uint8_t command;        // (enum with NOP (code = 0), GET (code = 1), SET (code = 2), DELETE (code = 3)) (GET is only included as a formality as it doesn't change state)
     char key[...];          // Null terminated string
     uint64_t value_length;  // length of the value (note, the key string needs to be padded so that this field can be 8 byte aligned).
     uint8_t value[...];
@@ -46,18 +46,17 @@ struct Command {
 ## Key Value Structure
 - In addition to the append only log file, we also need to actually maintain a hashmap in order to service get commands without iterating though the entire log file.
 - In order to maintain a HashMap on disk, we will need to make each entry fixed length. 
-- A hashmap entry be stored as is shown below. The first 17 characters of the string will be stored inline (leaving space for the null terminator character). The `cmd_byte_offset` is the byte offset of the relevant SET command in the commands log file. We can get the fill key and value by following this byte offset.
+- A hashmap entry be stored as is shown below. The `cmd_byte_offset` is the byte offset of the relevant SET command in the commands log file. We can get the fill key and value by following this byte offset.
 ```c
-// 32 bytes
+// 16 bytes (8 byte aligned)
 struct HashMapEntry {
     uint64_t cmd_byte_offset;
-    uint32_t key_length;        // Is this field is 0, then this slot is empty
-    char string[18];
-    uint8_t inline_value_slot;  // UINT8_MAX if value is not inlined
+    uint32_t key_hash;
+    uint16_t key_length;        // Is this field is 0, then this slot is empty
+    uint8_t inline_kv_slot;  // UINT8_MAX if value is not inlined
     uint8_t inline_value_len;
 }
 ```
-
 - The hashmap file will also store the following metadata in the first page. 
 ```c
 // 32 bytes
@@ -68,12 +67,16 @@ struct HashMapMetadata {
     uint64_t num_entries;
 }
 ```
+
 - We will also maintain a bloom filter to possibly skip disk reads. This bloom filter will take up the remaining 4064 bytes in the first page. 
 
 - **Inline Value store optimization** => We group each slot into a page (4096 bytes).
-    - bytes 0 - 3200 => Store 100 KV slots (some of these slots may be unused in the last page to allow for power-of-2 sizing)
-    - bytes 3200 - 3264 => Store packed bitmap of which inline value slots are taken. (we're only using 13 bits of the 64 bytes (512 bits) here, maybe we can find a use for the remaining bytes?)
-    - bytes 3264 - 4096 => Stores 13 slots for inline values stores that are 64 bytes each. 
+    - Page Format:
+        - bytes 0 - 2048 => Store 128 entry slots
+        - bytes 2048 - 2050 => Store packed bitmap of which inline KV slots are taken. 
+        - bytes 2050 - 4078 => Stores 16 slots for inline values stores that are 127 bytes each. 
+        - bytes 4078 = 4096 => Unused
+    - KV format: This will store the value first and then null-terminated string immediately after. We can differentiate between these two using the `inline_value_len` field. 
 
 - **Rehashing** => TBD. 
 - Servicing GET, SET, and DELETE operations will have roughly n/2 threads working on this where n is the number of logical cores on our machine. 
