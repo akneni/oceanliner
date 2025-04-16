@@ -13,17 +13,27 @@
 #define HASH_SEED 42
 
 // Number of slots to check in a SET op before triggering a rehash
-#define KEY_NUM_SLOTS 16
+#define KEY_NUM_SLOTS 32
 
 #define DM_PAGE_SIZE 4096
-#define INLINE_VALS_OFFSET 2050
+#define INLINE_KV_OFFSET 2050
+
+// Size in bytes of the inline key-value slot
+#define IKVS_SIZE 127
+
+// The number of inline key-value slots
+#define IKVS_NUM_SLOTS 16
 
 typedef struct DiskMap {
 
     // Copies of metadata to ensure they stay in memory
     uint64_t last_committed_index;
     uint64_t last_committed_term;
+    
+    // Represented as a power of 2
     uint64_t num_slots;
+
+    // Represented in regular base 10
     uint64_t num_entries;
 
     // mmap()ed hashmap data. 

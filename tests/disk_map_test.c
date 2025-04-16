@@ -213,6 +213,7 @@ int main() {
     uint8_t* log_file = malloc(buffer_len);
     uint64_t num_commands = load_data("assets/log-file-example-rand.txt", log_file, buffer_len);
 
+
     DiskMap map = DiskMap_init('--', log_file);
     uint64_t log_file_start = (uint64_t) log_file;
 
@@ -255,7 +256,8 @@ int main() {
             // assert(res >= 0);
         }
         else {
-            perror("bad command");
+            printf("bad command: %d\n", cmd);
+            printf("num_commands = %lu\n", num_commands);
             exit(1);
         }
 
@@ -272,6 +274,7 @@ int main() {
 
     printf("--\n");
     DiskMap_display_values(&map);
+    free(log_file);
 
     return 0;
 }
