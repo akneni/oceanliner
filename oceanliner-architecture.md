@@ -81,6 +81,7 @@ struct HashMapMetadata {
 - Clients will send messages to the leader over UDP. This is because a process can only have 4096 files open (including TCP connections) at once. Since we're trying to create an extremely high throughput implementation of raft, it's likely that we will need to service more than 4K clients at a time. 
 - The nodes in the cluster will communicate with each other using TCP. 
 
+
 ## Raft Optimizations
 - Our implementation will include batching of AppendEntries requests to minimize the number of RPC calls and improve throughput.  Each batch of commands, once formed, is replicated in a single AppendEntries message. The `num_commands` and `command_length` fields in the log header are used to efficiently decode the batch during replay.
 
