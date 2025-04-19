@@ -47,17 +47,17 @@ struct Command {
 - In addition to the append only log file, we also need to actually maintain a hashmap in order to service get commands without iterating though the entire log file.
 - In order to maintain a HashMap on disk, we will need to make each entry fixed length. 
 - A hashmap entry be stored as is shown below. The `cmd_byte_offset` is the byte offset of the relevant SET command in the commands log file. We can get the fill key and value by following this byte offset.
+- Possible KV optimization => We don't bother comparing the keys if the hashes match, we just assume the keys match if the hashes match. The possibility of a collision even with 1 billion records is 1 in 250 quadrillion. 
 ```c
-// 16 bytes (8 byte aligned) (v2)
+// 24 bytes (8 byte aligned) (v3.2) (same logical struct, but we store these in a SoA format in the first 3072 bytes of the page)
 struct HashMapEntry {
-    uint64_t cmd_byte_offset;
-    uint32_t key_hash;
-    uint16_t key_length;        // Is this field is 0, then this slot is empty
-    uint8_t inline_kv_slot;  // UINT8_MAX if value is not inlined
-    uint8_t inline_value_len;
+    uint64_t cmd_byte_offset_and_inline_value_slot;   // UINT64_MAX if the field is empty (upper 56 bits is the cmd_byte_offset while the lower 8 bits is the inline_value_slot)
+    uint8_t key_hash[16];
 }
 ```
-- The hashmap file will also store the following metadata in the first page. 
+
+
+- The hashmap file will also store the following metadata in the last page. 
 ```c
 // 32 bytes
 struct HashMapMetadata {
@@ -65,18 +65,19 @@ struct HashMapMetadata {
     uint64_t last_committed_term;
     uint64_t num_slots;
     uint64_t num_entries;
+    uint8_t bloom_filter[];
 }
 ```
 
 - We will also maintain a bloom filter to possibly skip disk reads. This bloom filter will take up the remaining 4064 bytes in the first page. 
-
 - **Inline Value store optimization** => We group each slot into a page (4096 bytes).
     - Page Format:
-        - bytes 0 - 2048 => Store 128 entry slots
-        - bytes 2048 - 2050 => Store packed bitmap of which inline KV slots are taken. 
-        - bytes 2050 - 4078 => Stores 16 slots for inline values stores that are 127 bytes each. 
-        - bytes 4078 = 4096 => Unused
-    - KV format: This will store the value first and then null-terminated string immediately after. We can differentiate between these two using the `inline_value_len` field. 
+        - bytes 0 - 3072 => Store 128 entry slots
+        - bytes 3072 - 4032 => Stores 15 slots for inline values stores that are 64 bytes each.
+        - bytes 4032 - 4072 => `pthread_mutex_t` type (embedded lock).
+        - bytes 4072 - 4074 => packed bitmap of value slots. 
+        - bytes 4074 - 4096 => Unused
+    - The inline value slot will have a length (byte 63 for 64 bytes) and the first 63 bytes will be used to store the actual data. 
 
 - **Rehashing** => TBD. 
 - Servicing GET, SET, and DELETE operations will have roughly n/2 threads working on this where n is the number of logical cores on our machine. 
@@ -115,39 +116,3 @@ if (leaderStableFor >= STABLE_THRESHOLD) {
 - To ensure efficient handling of GET requests, especially under high load, the fixed-length HashMap structure enables quick access to key metadata without scanning the full command log. The Bloom filter provides a fast, probabilistic way to skip disk lookups when a key is definitely not present.
 - Performance and correctness under failure will be tested across a range of hardware setups and workloads, and leader election patterns will be monitored to ensure adaptive timeout logic behaves as expected.
 
-
-## Possible HashMap Implementations
-- Possible KV optimization => We don't bother comparing the keys if the hashes match, we just assume the keys match if the hashes match. The possibility of a collision even with 1 billion records is 1 in 250 quadrillion. 
-```c
-// 24 bytes (8 byte aligned) (v3)
-struct HashMapEntry {
-    int64_t cmd_byte_offset;   // -1 if the field is empty
-    uint8_t key_hash[15];
-    uint8_t inline_kv_slot;    // UINT8_MAX if value is not inlined
-}
-```
-- **Inline Value store optimization** => We group each slot into a page (4096 bytes).
-    - Page Format:
-        - bytes 0 - 3072 => Store 128 entry slots
-        - bytes 3072 - 4032 => Stores 15 slots for inline values stores that are 64 bytes each.
-        - bytes 4032 - 4072 => pthread_mutex_t type (embedded lock).
-        - bytes 4072 - 4074 => packed bitmap of value slots. 
-        - bytes 4074 - 4096 => Unused
-    - The inline value slot will have a length (byte 63 for 64 bytes) and the first 63 bytes will be used to store the actual data. 
-
-
-```c
-// 24 bytes (8 byte aligned) (v3.1)
-struct HashMapEntry {
-    uint64_t cmd_byte_offset_and_inline_value_slot;   // UINT64_MAX if the field is empty (upper 56 bits is the cmd_byte_offset while the lower 8 bits is the inline_value_slot)
-    uint8_t key_hash[16];
-}
-```
-
-```c
-// 24 bytes (8 byte aligned) (v3.2) (same logical struct, but we store these in a SoA format in the first 3072 bytes of the page)
-struct HashMapEntry {
-    uint64_t cmd_byte_offset_and_inline_value_slot;   // UINT64_MAX if the field is empty (upper 56 bits is the cmd_byte_offset while the lower 8 bits is the inline_value_slot)
-    uint8_t key_hash[16];
-}
-```

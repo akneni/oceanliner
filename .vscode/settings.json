@@ -22,5 +22,8 @@
         "stdbool.h": "c",
         "disk_map.h": "c",
         "pthread.h": "c"
-    }
+    },
+    "cSpell.words": [
+        "pthread"
+    ]
 }
