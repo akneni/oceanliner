@@ -2,26 +2,22 @@
 #define GLOBALS_H
 
 #include <stdio.h>
+#include <stdint.h>
+#include <netinet/in.h>
 
 
-#define VALUE_MAX_SIZE 1024
+#define P_ADDR_LEN 22
 
-#define ADDR_IP_LEN 20
-#define ADDR_PORT_LEN 6
+// The maximum values for the key and the value
+#define MAX_KEY_LEN UINT16_MAX
+#define MAX_VAL_LEN UINT32_MAX
 
-
-typedef enum StateCommand {
-    SC_NOP,
-    SC_GET,
-    SC_SET,
-    SC_DELETE,
-} StateCommand;
-
-typedef struct Addr {
-    char ip[ADDR_IP_LEN];
-    char port[ADDR_PORT_LEN];
-} Addr;
-
+//
+typedef struct dual_format_addr_t {
+    char presentation_ip[P_ADDR_LEN];
+    struct sockaddr_in addr;
+    uint16_t port;
+} dual_format_addr_t;
 
 uint64_t fsizeof(FILE* f);
 uint8_t* jump_to_alignment(uint8_t* ptr, uint64_t alignment);

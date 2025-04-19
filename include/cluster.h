@@ -8,7 +8,7 @@
 typedef struct Cluster {
     uint64_t length;
     int32_t fds[256];
-    Addr addrs[256];
+    dual_format_addr_t addrs[256];
 } Cluster;
 
 

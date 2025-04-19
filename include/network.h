@@ -11,6 +11,6 @@
 #include "globals.h"
 
 
-int32_t hl_connect(Addr* addr);
+int32_t hl_connect(dual_format_addr_t* addr);
 
 #endif // NETWORK_H

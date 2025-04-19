@@ -9,7 +9,7 @@
 
 #include "../include/cluster.h"
 #include "../include/globals.h"
-#include "../include/disk_map.h"
+#include "../include/kv_store.h"
 
 
 // ========================= Raft Global Variables
@@ -77,6 +77,8 @@ uint64_t matchIndex = 0;
 
 
 int main(int argc, char** argv) {
+
+	printf("%lu\n", sizeof(kvs_page_t));
 
 	return 0;
 }

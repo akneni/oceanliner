@@ -9,6 +9,18 @@
         "stdio.h": "c",
         "globals.h": "c",
         "network.h": "c",
-        "string.h": "c"
+        "string.h": "c",
+        "in.h": "c",
+        "array": "c",
+        "string": "c",
+        "buffer": "c",
+        "internet": "c",
+        "socket": "c",
+        "string_view": "c",
+        "iterator": "c",
+        "vector": "c",
+        "stdbool.h": "c",
+        "disk_map.h": "c",
+        "pthread.h": "c"
     }
 }
