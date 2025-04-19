@@ -75,9 +75,9 @@ uint64_t matchIndex = 0;
 
 
 
+#include "../include/xxhash.h"
 
 int main(int argc, char** argv) {
-
 	printf("%lu\n", sizeof(kvs_page_t));
 
 	return 0;

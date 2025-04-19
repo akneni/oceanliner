@@ -5,7 +5,7 @@
 #include <fcntl.h>
 #include "../include/log_file.h"
 #include "../include/globals.h"
-
+#include "../include/xxhash.h"
 
 uint64_t kvs_command_len(const kvs_command_t* log_entry) {
     return (
@@ -36,4 +36,8 @@ void log_file_get_data(uint64_t cmd_offset, uint8_t* out_buffer, size_t length) 
     fread(out_buffer, 1, length, fp);
     
     fclose(fp);
+}
+
+void foo() {
+    // XXH3_128bits()
 }

@@ -10,12 +10,12 @@
 ## RSM State
 - The state that is maintained by an append only log file. 
 ```c
-// 64 bytes (8 byte aligned)
+// 40 bytes (8 byte aligned)
 struct LogEntryHeader {
-    uint32_t term;
-    uint32_t num_commands; // The number of commands stored at this log index (this allows us to batch appendEntries calls)
+    uint64_t term;
+    uint64_t num_commands; // The number of commands stored at this log index (this allows us to batch appendEntries calls)
     uint64_t log_index;
-    uint64_t command_length;  // The Length of all the commands in bytes. 
+    size_t command_length;  // The Length of all the commands in bytes. 
     uint8_t header_hash[16];  // Hash of the header. If the hashes don't line up, then we assume it was because of a partial write. 
 }
 

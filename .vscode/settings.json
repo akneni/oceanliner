@@ -21,7 +21,8 @@
         "vector": "c",
         "stdbool.h": "c",
         "disk_map.h": "c",
-        "pthread.h": "c"
+        "pthread.h": "c",
+        "xxhash.h": "c"
     },
     "cSpell.words": [
         "pthread"

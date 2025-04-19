@@ -8,7 +8,9 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <pthread.h>
+
 #include "../include/globals.h"
+#include "../include/xxhash.h"
 
 #define HASH_SEED 42
 
@@ -44,8 +46,7 @@ typedef struct inline_val_slot {
 typedef struct kvs_page_t {
     // Command byte offset and inline value slot
     uint64_t cbo_and_ivs[KVE_NUM_SLOTS];
-
-    hash_128bi key_hash[KVE_NUM_SLOTS];
+    XXH128_hash_t key_hash[KVE_NUM_SLOTS];
     inline_val_slot inline_vals[IVS_NUM_SLOTS];
     pthread_mutex_t latch;
     uint8_t inline_vals_len[IVS_NUM_SLOTS];

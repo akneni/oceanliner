@@ -8,13 +8,29 @@
 
 // Key-value store Command Encoding
 typedef struct kvs_command_t {
-    kvs_op_t type;
     uint32_t key_length;
     uint32_t value_length;
+    kvs_op_t type;
+    uint8_t padding[3];
 
     // First stores the binary data (value), then stores the key (null terminated)
     uint8_t data[];
 } kvs_command_t;
+
+// Header for the key-value store batch
+typedef struct {
+    uint64_t term;
+    uint64_t num_commands;
+    uint64_t log_index;
+    size_t data_length;         // Length of all the commands in bytes
+    XXH128_hash_t header_hash;
+} kvsb_header_t;
+
+// batch od key value store commands 
+typedef struct {
+    kvsb_header_t header;
+    uint8_t data[];
+} kvs_batch_cmd_t;
 
 uint64_t kvs_command_len(const kvs_command_t* log_entry);
 char* kvs_command_get_key(const kvs_command_t* log_entry);

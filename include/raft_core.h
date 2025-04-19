@@ -8,6 +8,7 @@
 
 #include "../include/globals.h"
 #include "../include/log_file.h"
+#include "../include/xxhash.h"
 
 // Constants
 #define MAX_NODES 5
@@ -88,30 +89,28 @@ typedef struct {
 
 // AppendEntries RPC structures
 typedef struct {
-    uint64_t term;            // Leader's term
-    uint32_t leader_id;       // Leader's ID
     uint64_t prev_log_index;  // Index of log entry before new ones
     uint64_t prev_log_term;   // Term of prev_log_index entry
-    raft_entry_t* entries;    // Log entries to store
-    size_t n_entries;         // Number of entries
     uint64_t leader_commit;   // Leader's commitIndex
+    size_t n_entries;         // Number of entries
+    uint8_t entries[];        // Log entries to store
 } raft_append_entries_req_t;
 
 typedef struct {
-    uint64_t term;        // Current term
-    bool success;         // True if follower matched prev_log_index and prev_log_term
+    bool success;        // True if follower matched prev_log_index and prev_log_term
+
+    // These fields are only relevent if `success` is false
+    uint64_t lc_log_idx; // last committed log index
+    uint64_t lc_term;    // last committed term
 } raft_append_entries_resp_t;
 
 // RequestVote RPC structures
 typedef struct {
-    uint64_t term;            // Candidate's term
-    uint32_t candidate_id;    // Candidate requesting vote
     uint64_t last_log_index;  // Index of candidate's last log entry
     uint64_t last_log_term;   // Term of candidate's last log entry
 } raft_request_vote_req_t;
 
 typedef struct {
-    uint64_t term;        // Current term, for candidate to update itself
     bool vote_granted;    // True means candidate received vote
 } raft_request_vote_resp_t;
 
@@ -146,6 +145,15 @@ typedef enum {
     RAFT_RPC_APPEND_ENTRIES,
     RAFT_RPC_REQUEST_VOTE
 } raft_rpc_type_t;
+
+typedef struct {
+    uint64_t body_length;
+    uint64_t term;
+    uint64_t sender_node_id;
+    raft_rpc_type_t rpc_type;
+    uint8_t padding[7];
+    uint8_t data[];
+} raft_msg_t;
 
 // RPC handler functions
 int raft_handle_request_vote(raft_node_t* node,

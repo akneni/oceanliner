@@ -10,47 +10,7 @@
 #include "../include/globals.h"
 #include "../include/kv_store.h"
 #include "../include/log_file.h"
-
-
-static inline uint32_t murmur_32_scramble(uint32_t k) {
-    k *= 0xcc9e2d51;
-    k = (k << 15) | (k >> 17);
-    k *= 0x1b873593;
-    return k;
-}
-
-static inline uint32_t murmur3_32(const uint8_t* key, size_t len) {
-	uint32_t h = HASH_SEED;
-    uint32_t k;
-    /* Read in groups of 4. */
-    for (size_t i = len >> 2; i; i--) {
-        // Here is a source of differing results across endiannesses.
-        // A swap here has no effects on hash properties though.
-        memcpy(&k, key, sizeof(uint32_t));
-        key += sizeof(uint32_t);
-        h ^= murmur_32_scramble(k);
-        h = (h << 13) | (h >> 19);
-        h = h * 5 + 0xe6546b64;
-    }
-    /* Read the rest. */
-    k = 0;
-    for (size_t i = len & 3; i; i--) {
-        k <<= 8;
-        k |= key[i - 1];
-    }
-    // A swap is *not* necessary here because the preceding loop already
-    // places the low bytes in the low places according to whatever endianness
-    // we use. Swaps only apply when the memory is copied in a chunk.
-    h ^= murmur_32_scramble(k);
-    /* Finalize. */
-	h ^= len;
-	h ^= h >> 16;
-	h *= 0x85ebca6b;
-	h ^= h >> 13;
-	h *= 0xc2b2ae35;
-	h ^= h >> 16;
-	return h;
-}
+#include "../include/xxhash.h"
 
 static inline int64_t find_free_value_slot(uint8_t* ivs_len_arr) {
     for (uint64_t i = 0; i < IVS_NUM_SLOTS; i++) {
@@ -62,13 +22,12 @@ static inline int64_t find_free_value_slot(uint8_t* ivs_len_arr) {
 }
 
 // TODO: choose a real 128 bit hash function
-static hash_128bi hash(const char* key) {
-    uint64_t h = (uint64_t) murmur3_32((uint8_t*) key, strlen(key));
+static XXH128_hash_t hash(const char* key) {
+    size_t key_length = strlen(key);
+    assert(key_length <= MAX_KEY_LEN);
 
-    hash_128bi h_128;
-    h_128.hash_p1 = h | (h << sizeof(uint32_t));
-    h_128.hash_p2 = h | (h << sizeof(uint32_t));
-    return h_128;
+    XXH128_hash_t h = XXH3_128bits(key, key_length);
+    return h;
 }
 
 /// @brief
@@ -76,14 +35,14 @@ static hash_128bi hash(const char* key) {
 /// @param page_idx
 /// @param slot_idx
 /// @param num_slots Expected to be passed as a power of 2. So passing `10` for this argument would mean that there are 1024 slots.
-static inline void hash_to_slot(const hash_128bi* h, uint64_t* page_idx, uint64_t* slot_idx, uint64_t num_slots_log2) {
-    *page_idx = h->hash_p1 >> (sizeof(*h) - num_slots_log2);
-    *slot_idx = h->hash_p1 >> (sizeof(*h) - KVE_NUM_SLOTS_LOG2);
+static inline void hash_to_slot(const XXH128_hash_t* h, uint64_t* page_idx, uint64_t* slot_idx, uint64_t num_slots_log2) {
+    *page_idx = h->high64 >> (sizeof(*h) - num_slots_log2);
+    *slot_idx = h->high64 >> (sizeof(*h) - KVE_NUM_SLOTS_LOG2);
 
     assert(*slot_idx < 128);
 }
 
-static inline bool key_hash_cmp(const hash_128bi* h1, const hash_128bi* h2) {
+static inline bool key_hash_cmp(const XXH128_hash_t* h1, const XXH128_hash_t* h2) {
     #ifdef __AVX2__
         __m128i h1_simd = _mm_load_si128((__m128i*) h1);
         __m128i h2_simd = _mm_load_si128((__m128i*) h2);
@@ -93,7 +52,7 @@ static inline bool key_hash_cmp(const hash_128bi* h1, const hash_128bi* h2) {
 
         return _mm_testc_si128(zero, cmp) == 1;
     #else
-        return (h1->hash_p1 == h2->hash_p1 && h1->hash_p2 == h2->hash_p2);
+        return (h1->high64 == h2->high64 && h1->low64 == h2->low64);
     #endif
 }
 
@@ -105,7 +64,7 @@ static inline bool key_hash_cmp(const hash_128bi* h1, const hash_128bi* h2) {
 /// @param slot_ptr_output
 static bool __kv_store_find_entry(
     const kv_store_t* map,
-    const hash_128bi* key_hash,
+    const XXH128_hash_t* key_hash,
     uint64_t* page_idx_output,
     uint64_t* slot_idx_output
 ) {
@@ -138,7 +97,7 @@ static bool __kv_store_find_entry(
 /// @param slot_ptr_output
 static bool __kv_store_find_empty_slot(
     const kv_store_t* map,
-    const hash_128bi* key_hash,
+    const XXH128_hash_t* key_hash,
     uint64_t* page_idx_output,
     uint64_t* slot_idx_output
 ) {
@@ -215,7 +174,7 @@ kv_store_t kv_store_init(const char* filepath, uint8_t* log_file) {
 /// @param val_output_buffer
 /// @return The length of th evalue when the key exists and -1 if it doesn't exist
 uint8_t* kv_store_get(const kv_store_t* map, const char* key, int64_t* value_length) {
-    hash_128bi key_hash = hash(key);
+    XXH128_hash_t key_hash = hash(key);
     uint64_t page_idx;
     uint64_t slot_idx;
 
@@ -262,7 +221,7 @@ uint8_t* kv_store_get(const kv_store_t* map, const char* key, int64_t* value_len
 /// @param value_len
 /// @return
 int64_t kv_store_set(kv_store_t* map, uint64_t cmd_byte_offset, const char* key, uint8_t* value, size_t value_len) {
-    hash_128bi key_hash = hash(key);
+    XXH128_hash_t key_hash = hash(key);
     uint64_t page_idx;
     uint64_t slot_idx;
 
@@ -306,7 +265,7 @@ int64_t kv_store_set(kv_store_t* map, uint64_t cmd_byte_offset, const char* key,
 /// @param key
 /// @return
 int64_t kv_store_delete(kv_store_t* map, const char* key) {
-    hash_128bi key_hash = hash(key);
+    XXH128_hash_t key_hash = hash(key);
     uint64_t page_idx;
     uint64_t slot_idx;
 
