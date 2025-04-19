@@ -37,12 +37,6 @@ typedef enum kvs_op_t {
     CMD_DELETE,
 } kvs_op_t;
 
-// 128 bit hash for the key
-typedef struct key_hash_t {
-    uint64_t hash_p1;
-    uint64_t hash_p2;
-} key_hash_t;
-
 typedef struct inline_val_slot {
     uint8_t data[64];
 } inline_val_slot;
@@ -51,7 +45,7 @@ typedef struct kvs_page_t {
     // Command byte offset and inline value slot
     uint64_t cbo_and_ivs[KVE_NUM_SLOTS];
 
-    key_hash_t key_hash[KVE_NUM_SLOTS];
+    hash_128bi key_hash[KVE_NUM_SLOTS];
     inline_val_slot inline_vals[IVS_NUM_SLOTS];
     pthread_mutex_t latch;
     uint8_t inline_vals_len[IVS_NUM_SLOTS];
@@ -63,11 +57,11 @@ typedef struct kv_store_t {
     // Copies of metadata to ensure they stay in memory
     uint64_t last_committed_index;
     uint64_t last_committed_term;
-    
+
     // Represented as a power of 2
     uint64_t num_slots_log2;
 
-    // mmap()ed hashmap data. 
+    // mmap()ed hashmap data.
     kvs_page_t* data;
 } kv_store_t;
 

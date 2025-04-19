@@ -16,8 +16,7 @@ struct LogEntryHeader {
     uint32_t num_commands; // The number of commands stored at this log index (this allows us to batch appendEntries calls)
     uint64_t log_index;
     uint64_t command_length;  // The Length of all the commands in bytes. 
-    uint8_t header_hash[24];  // Hash of the header. If the hashes don't line up, then we assume it was because of a partial write. 
-    uint8_t magic_number[16];    // A random constant that we use to ensure that the 64 byte chunk in question is a header.
+    uint8_t header_hash[16];  // Hash of the header. If the hashes don't line up, then we assume it was because of a partial write. 
 }
 
 // header1 and header2 are copies of each other and allow us to iterate over our log file in forward or reverse order. 

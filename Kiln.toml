@@ -9,6 +9,3 @@ compiler_path = "gcc"
 debug_flags = ["-g", "-O0", "-Wall", "-fsanitize=undefined"]
 release_flags = ["-Wall", "-O3"]
 
-[[dependency]]
-uri = "https://github.com/akneni/kiln_string.git"
-version = "v0.0.1"

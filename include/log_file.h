@@ -16,9 +16,9 @@ typedef struct kvs_command_t {
     uint8_t data[];
 } kvs_command_t;
 
-extern inline uint64_t kvs_command_len(const kvs_command_t* log_entry);
-extern inline char* kvs_command_get_key(const kvs_command_t* log_entry);
-extern inline void kvs_command_get_value(kvs_command_t* log_entry, uint8_t** value);
+uint64_t kvs_command_len(const kvs_command_t* log_entry);
+char* kvs_command_get_key(const kvs_command_t* log_entry);
+void kvs_command_get_value(kvs_command_t* log_entry, uint8_t** value);
 
 void log_file_get_data(uint64_t cmd_offset, uint8_t* out_buffer, size_t length);
 

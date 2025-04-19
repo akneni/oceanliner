@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <pthread.h>
+#include <immintrin.h>
 
 #include "../include/globals.h"
 #include "../include/kv_store.h"
@@ -61,54 +62,59 @@ static inline int64_t find_free_value_slot(uint8_t* ivs_len_arr) {
 }
 
 // TODO: choose a real 128 bit hash function
-static key_hash_t hash(const char* key) {
+static hash_128bi hash(const char* key) {
     uint64_t h = (uint64_t) murmur3_32((uint8_t*) key, strlen(key));
 
-    key_hash_t h_128;
+    hash_128bi h_128;
     h_128.hash_p1 = h | (h << sizeof(uint32_t));
     h_128.hash_p2 = h | (h << sizeof(uint32_t));
     return h_128;
 }
 
-/// @brief 
-/// @param key 
-/// @param page_idx 
-/// @param slot_idx 
-/// @param num_slots Expected to be passed as a power of 2. So passing `10` for this argument would mean that there are 1024 slots. 
-static inline void hash_to_slot(key_hash_t* h, uint64_t* page_idx, uint64_t* slot_idx, uint64_t num_slots_log2) {
-    *page_idx = h->hash_p1 >> (sizeof(h) - num_slots_log2);
-    *slot_idx = h->hash_p1 >> (sizeof(h) - KVE_NUM_SLOTS_LOG2);
+/// @brief
+/// @param key
+/// @param page_idx
+/// @param slot_idx
+/// @param num_slots Expected to be passed as a power of 2. So passing `10` for this argument would mean that there are 1024 slots.
+static inline void hash_to_slot(const hash_128bi* h, uint64_t* page_idx, uint64_t* slot_idx, uint64_t num_slots_log2) {
+    *page_idx = h->hash_p1 >> (sizeof(*h) - num_slots_log2);
+    *slot_idx = h->hash_p1 >> (sizeof(*h) - KVE_NUM_SLOTS_LOG2);
 
     assert(*slot_idx < 128);
 }
 
-static inline bool key_hash_cmp(key_hash_t* h1, key_hash_t* h2) {
+static inline bool key_hash_cmp(const hash_128bi* h1, const hash_128bi* h2) {
     #ifdef __AVX2__
-        // TODO, use real AVX2 intrinsics here
-        return (h1->hash_p1 == h2->hash_p1 && h1->hash_p2 == h2->hash_p2);
+        __m128i h1_simd = _mm_load_si128((__m128i*) h1);
+        __m128i h2_simd = _mm_load_si128((__m128i*) h2);
+
+        __m128i cmp = _mm_cmpeq_epi8(h1_simd, h2_simd);
+        __m128i zero = _mm_setzero_si128();
+
+        return _mm_testc_si128(zero, cmp) == 1;
     #else
         return (h1->hash_p1 == h2->hash_p1 && h1->hash_p2 == h2->hash_p2);
     #endif
 }
 
 /// @brief Finds the slot with the specified key and aquires a lock on that page if a free slot is available.
-/// @param map 
-/// @param key 
-/// @param page_idx_output 
-/// @param page_ptr_output 
-/// @param slot_ptr_output 
+/// @param map
+/// @param key
+/// @param page_idx_output
+/// @param page_ptr_output
+/// @param slot_ptr_output
 static bool __kv_store_find_entry(
-    const kv_store_t* map, 
-    const key_hash_t* key_hash, 
-    uint64_t* page_idx_output, 
+    const kv_store_t* map,
+    const hash_128bi* key_hash,
+    uint64_t* page_idx_output,
     uint64_t* slot_idx_output
 ) {
     uint64_t page_idx;
     uint64_t slot_idx;
     hash_to_slot(key_hash, &page_idx, &slot_idx, map->num_slots_log2);
     *page_idx_output = page_idx;
-    
-    
+
+
     kvs_page_t* page_ptr = &map->data[page_idx];
     pthread_mutex_lock(&page_ptr->latch);
 
@@ -126,20 +132,20 @@ static bool __kv_store_find_entry(
 }
 
 /// @brief Finds the slot of the matching key or the first empty slot. Aquires a lock on the page if a slot is found
-/// @param map 
-/// @param key 
-/// @param page_ptr_output 
-/// @param slot_ptr_output 
+/// @param map
+/// @param key
+/// @param page_ptr_output
+/// @param slot_ptr_output
 static bool __kv_store_find_empty_slot(
-    const kv_store_t* map, 
-    const key_hash_t* key_hash, 
-    uint64_t* page_idx_output, 
+    const kv_store_t* map,
+    const hash_128bi* key_hash,
+    uint64_t* page_idx_output,
     uint64_t* slot_idx_output
 ) {
     uint64_t page_idx;
     uint64_t slot_idx;
-    hash_to_slot(key_hash, &page_idx, &slot_idx, map->num_slots_log2);    
-    
+    hash_to_slot(key_hash, &page_idx, &slot_idx, map->num_slots_log2);
+
     *page_idx_output = page_idx;
     *slot_idx_output = UINT64_MAX;
 
@@ -150,7 +156,7 @@ static bool __kv_store_find_empty_slot(
     for (int i = 0; i < KEY_NUM_SLOTS; i++) {
         uint64_t curr_slot_offset = (slot_idx+i) & 0b0111111;
 
-        if (page_ptr->cbo_and_ivs == UINT64_MAX) {
+        if (page_ptr->cbo_and_ivs[i] == UINT64_MAX) {
             if (*slot_idx_output == UINT64_MAX) *slot_idx_output = curr_slot_offset;
             continue;
         }
@@ -181,7 +187,7 @@ kv_store_t kv_store_init(const char* filepath, uint8_t* log_file) {
 
     map.num_slots_log2 = 10;
     uint64_t num_pages = (1 << (map.num_slots_log2 - KVE_NUM_SLOTS_LOG2)) + 1;
-    
+
 
     size_t data_size = num_pages * sizeof(kvs_page_t);
     map.data = (kvs_page_t*) malloc(data_size);
@@ -203,13 +209,13 @@ kv_store_t kv_store_init(const char* filepath, uint8_t* log_file) {
     return map;
 }
 
-/// @brief 
-/// @param map 
-/// @param key 
-/// @param val_output_buffer 
+/// @brief
+/// @param map
+/// @param key
+/// @param val_output_buffer
 /// @return The length of th evalue when the key exists and -1 if it doesn't exist
 uint8_t* kv_store_get(const kv_store_t* map, const char* key, int64_t* value_length) {
-    key_hash_t key_hash = hash(key);
+    hash_128bi key_hash = hash(key);
     uint64_t page_idx;
     uint64_t slot_idx;
 
@@ -221,14 +227,14 @@ uint8_t* kv_store_get(const kv_store_t* map, const char* key, int64_t* value_len
     }
 
     kvs_page_t* page = &map->data[page_idx];
-    
+
 
     uint64_t cbo = extract_cbo(page->cbo_and_ivs[slot_idx]);
     uint64_t ivs = extract_ivs(page->cbo_and_ivs[slot_idx]);
 
     if (ivs != UINT8_MAX) {
         inline_val_slot* value_ptr = &page->inline_vals[ivs];
-        
+
         uint8_t* value_data = (uint8_t*) malloc(page->inline_vals_len[ivs]);
         memcpy(value_data, value_ptr->data, (size_t) page->inline_vals_len[ivs]);
 
@@ -249,18 +255,18 @@ uint8_t* kv_store_get(const kv_store_t* map, const char* key, int64_t* value_len
     }
 }
 
-/// @brief 
-/// @param map 
-/// @param key 
-/// @param value 
-/// @param value_len 
-/// @return 
+/// @brief
+/// @param map
+/// @param key
+/// @param value
+/// @param value_len
+/// @return
 int64_t kv_store_set(kv_store_t* map, uint64_t cmd_byte_offset, const char* key, uint8_t* value, size_t value_len) {
-    key_hash_t key_hash = hash(key);
+    hash_128bi key_hash = hash(key);
     uint64_t page_idx;
     uint64_t slot_idx;
-    
-    bool found_slot = __kv_store_find_empty_slot(map, key, &page_idx, &slot_idx);
+
+    bool found_slot = __kv_store_find_empty_slot(map, &key_hash, &page_idx, &slot_idx);
     if (!found_slot) {
         perror("failed to find slot.\n");
         exit(1);
@@ -295,15 +301,15 @@ int64_t kv_store_set(kv_store_t* map, uint64_t cmd_byte_offset, const char* key,
     return 0;
 }
 
-/// @brief 
-/// @param map 
-/// @param key 
-/// @return 
+/// @brief
+/// @param map
+/// @param key
+/// @return
 int64_t kv_store_delete(kv_store_t* map, const char* key) {
-    key_hash_t key_hash = hash(key);
+    hash_128bi key_hash = hash(key);
     uint64_t page_idx;
     uint64_t slot_idx;
-    
+
     bool slot_found = __kv_store_find_entry(map, &key_hash, &page_idx, &slot_idx);
     if (!slot_found) {
         // Mutex is already unlocked if no slot is found
@@ -311,7 +317,7 @@ int64_t kv_store_delete(kv_store_t* map, const char* key) {
     }
 
     kvs_page_t* page = &map->data[page_idx];
-    
+
     uint64_t ivs = extract_ivs(page->cbo_and_ivs[slot_idx]);
     if (ivs != UINT8_MAX) {
         page->inline_vals_len[ivs] = UINT8_MAX;
@@ -323,17 +329,17 @@ int64_t kv_store_delete(kv_store_t* map, const char* key) {
 }
 
 /// @brief This is is to be used for debugging ONLY.
-/// @param map 
+/// @param map
 void kv_store_display_values(const kv_store_t* map) {
     assert(map->data != NULL);
 
     uint8_t buffer[4096];
     kvs_command_t* cmd_buffer = (kvs_command_t*) buffer;
-    
+
     uint64_t counter = 0;
     for(uint64_t page_idx = 1; page_idx < (map->num_slots_log2 / 100) + 1; page_idx++) {
         kvs_page_t* page = &map->data[page_idx];
-        
+
         for (uint64_t slot_idx = 0; slot_idx < KVE_NUM_SLOTS; slot_idx++) {
             if (page->cbo_and_ivs[slot_idx] != UINT64_MAX) {
                 counter++;
@@ -343,7 +349,7 @@ void kv_store_display_values(const kv_store_t* map) {
                 log_file_get_data(cbo, buffer, 4096);
 
                 printf("[%lu] (%s) (", counter, (char*) (&cmd_buffer->data[cmd_buffer->value_length]));
-                
+
                 uint8_t* value = cmd_buffer->data;
                 size_t val_len = (cmd_buffer->value_length > 100) ? 100 : cmd_buffer->value_length;
 

@@ -7,22 +7,22 @@
 #include "../include/globals.h"
 
 
-inline uint64_t kvs_command_len(const kvs_command_t* log_entry) {
+uint64_t kvs_command_len(const kvs_command_t* log_entry) {
     return (
         4 + // kvs_op_t type + padding
         4 + // uint32_t key_length
         4 + // uint32_t value_size
-        log_entry->key_length +
+        (uint64_t) log_entry->key_length +
         1 + // null terminator 
-        log_entry->value_length
+        (uint64_t) log_entry->value_length
     );
 }
 
-inline char* kvs_command_get_key(const kvs_command_t* log_entry) {
+char* kvs_command_get_key(const kvs_command_t* log_entry) {
     return (char*) log_entry->data;
 }
 
-inline void kvs_command_get_value(kvs_command_t* log_entry, uint8_t** value) {
+void kvs_command_get_value(kvs_command_t* log_entry, uint8_t** value) {
     *value = (log_entry->data + log_entry->key_length + 1);
 }
 
