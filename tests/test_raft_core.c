@@ -96,7 +96,7 @@ void test_log_operations(void) {
     result = raft_replicate_logs(node);
     assert(result == 0);
     
-    free(entry);  // Just free the entry structure, not its contents
+    free(entry);
     raft_destroy(node);
 }
 
@@ -180,18 +180,17 @@ void test_log_error_conditions(void) {
     result = raft_append_entry(node, future_entry);
     assert(result == 0);  // Should succeed as we don't validate terms yet
     
-    // Cleanup
-    raft_free_entry(entry);
+    free(entry);
     free(future_entry);
     raft_destroy(node);
 }
 
 void test_log_replication_basic(void) {
     printf("Testing basic log replication...\n");
-    
+
     raft_node_t* node = raft_init(1);
     assert(node != NULL);
-    
+
     // Add some entries as a follower
     const char* test_data = "test command";
     raft_entry_t* entry = raft_create_entry(
@@ -203,23 +202,24 @@ void test_log_replication_basic(void) {
     assert(entry != NULL);
     int result = raft_append_entry(node, entry);
     assert(result == 0);
-    free(entry);
-    
+    // raft_free_entry(entry); // <--- REMOVE THIS LINE
+
     // Try to replicate as follower (should fail)
     result = raft_replicate_logs(node);
     assert(result == -1);
-    
+
     // Become leader and try again
     raft_become_leader(node);
     result = raft_replicate_logs(node);
     assert(result == 0);
-    
+
     // Verify next_index values were updated
     for (uint32_t i = 0; i < MAX_NODES; i++) {
         if (i == node->node_id) continue;
-        assert(node->next_index[i] == 2);  // Should be incremented
+        assert(node->next_index[i] == 2); // Should be incremented
     }
-    
+
+    free(entry);
     raft_destroy(node);
 }
 
@@ -230,18 +230,34 @@ void test_append_entries_basic(void) {
     raft_node_t* follower = raft_init(1);
     assert(follower != NULL);
     
-    // Test heartbeat (empty AppendEntries)
-    raft_append_entries_req_t heartbeat = {0};
-    heartbeat.term = 1;
-    heartbeat.leader_id = 2;
+    // Create request message with AppendEntries data
+    raft_msg_t* req = (raft_msg_t*)malloc(sizeof(raft_msg_t) + sizeof(raft_append_entries_req_t));
+    assert(req != NULL);
     
-    raft_append_entries_resp_t resp = {0};
+    req->term = 1;
+    req->sender_node_id = 2;
+    req->rpc_type = RAFT_RPC_APPEND_ENTRIES;
     
-    int result = raft_handle_append_entries(follower, &heartbeat, &resp);
+    raft_append_entries_req_t* req_data = (raft_append_entries_req_t*)req->data;
+    req_data->prev_log_index = 0;
+    req_data->prev_log_term = 0;
+    req_data->leader_commit = 0;
+    
+    // Create response message
+    raft_msg_t* resp = (raft_msg_t*)malloc(sizeof(raft_msg_t) + sizeof(raft_append_entries_resp_t));
+    assert(resp != NULL);
+    
+    // Process the request
+    int result = raft_handle_append_entries(follower, req, resp);
     assert(result == 0);
-    assert(resp.success == true);
+    
+    // Check response
+    raft_append_entries_resp_t* resp_data = (raft_append_entries_resp_t*)resp->data;
+    assert(resp_data->success == true);
     assert(follower->leader_id == 2);
     
+    free(req);
+    free(resp);
     raft_destroy(follower);
     printf("Basic AppendEntries test passed\n");
 }
@@ -253,28 +269,44 @@ void test_append_entries_term_check(void) {
     assert(follower != NULL);
     follower->current_term = 2;  // Set higher term
     
-    // Request with lower term
-    raft_append_entries_req_t req = {0};
-    req.term = 1;  // Lower term
-    req.leader_id = 2;
+    // Create request message with lower term
+    raft_msg_t* req = (raft_msg_t*)malloc(sizeof(raft_msg_t) + sizeof(raft_append_entries_req_t));
+    assert(req != NULL);
     
-    raft_append_entries_resp_t resp = {0};
+    req->term = 1;  // Lower term
+    req->sender_node_id = 2;
+    req->rpc_type = RAFT_RPC_APPEND_ENTRIES;
     
-    int result = raft_handle_append_entries(follower, &req, &resp);
+    raft_append_entries_req_t* req_data = (raft_append_entries_req_t*)req->data;
+    req_data->prev_log_index = 0;
+    req_data->prev_log_term = 0;
+    req_data->leader_commit = 0;
+    
+    // Create response message
+    raft_msg_t* resp = (raft_msg_t*)malloc(sizeof(raft_msg_t) + sizeof(raft_append_entries_resp_t));
+    assert(resp != NULL);
+    
+    // Process the request
+    int result = raft_handle_append_entries(follower, req, resp);
     assert(result == 0);
-    assert(resp.success == false);
-    assert(resp.term == 2);  // Should return current term
     
+    // Check response
+    assert(resp->term == 2);  // Should return current term
+    raft_append_entries_resp_t* resp_data = (raft_append_entries_resp_t*)resp->data;
+    assert(resp_data->success == false);
+    
+    free(req);
+    free(resp);
     raft_destroy(follower);
     printf("AppendEntries term check test passed\n");
 }
 
 void test_append_entries_log_matching(void) {
     printf("Testing AppendEntries log matching...\n");
-    
+
     raft_node_t* follower = raft_init(1);
     assert(follower != NULL);
-    
+
     // Add an initial entry to follower's log
     const char* test_data = "test";
     raft_entry_t* entry = raft_create_entry(
@@ -286,21 +318,36 @@ void test_append_entries_log_matching(void) {
     assert(entry != NULL);
     int result = raft_append_entry(follower, entry);
     assert(result == 0);
-    free(entry);  // Free entry structure after appending
-    
-    // Test with mismatched prev_log_term
-    raft_append_entries_req_t req = {0};
-    req.term = 1;
-    req.leader_id = 2;
-    req.prev_log_index = 1;  // We have this index
-    req.prev_log_term = 2;   // But with different term
-    
-    raft_append_entries_resp_t resp = {0};
-    
-    result = raft_handle_append_entries(follower, &req, &resp);
+    // raft_free_entry(entry); // <--- REMOVE THIS LINE
+
+    // Create request message with mismatched log term
+    raft_msg_t* req = (raft_msg_t*)malloc(sizeof(raft_msg_t) + sizeof(raft_append_entries_req_t));
+    assert(req != NULL);
+
+    req->term = 1;
+    req->sender_node_id = 2;
+    req->rpc_type = RAFT_RPC_APPEND_ENTRIES;
+
+    raft_append_entries_req_t* req_data = (raft_append_entries_req_t*)req->data;
+    req_data->prev_log_index = 1;  // We have this index
+    req_data->prev_log_term = 2;   // But with different term
+    req_data->leader_commit = 0;
+
+    // Create response message
+    raft_msg_t* resp = (raft_msg_t*)malloc(sizeof(raft_msg_t) + sizeof(raft_append_entries_resp_t));
+    assert(resp != NULL);
+
+    // Process the request
+    result = raft_handle_append_entries(follower, req, resp);
     assert(result == 0);
-    assert(resp.success == false);  // Should fail due to term mismatch
-    
+
+    // Check response
+    raft_append_entries_resp_t* resp_data = (raft_append_entries_resp_t*)resp->data;
+    assert(resp_data->success == false);  // Should fail due to term mismatch
+
+    free(req);
+    free(resp);
+    free(entry);
     raft_destroy(follower);
     printf("Log matching test passed\n");
 }
@@ -311,20 +358,33 @@ void test_request_vote_basic(void) {
     raft_node_t* follower = raft_init(1);
     assert(follower != NULL);
     
-    // Create a RequestVote request
-    raft_request_vote_req_t req = {0};
-    req.term = 1;
-    req.candidate_id = 2;
-    req.last_log_index = 0;
-    req.last_log_term = 0;
+    // Create a RequestVote request message
+    raft_msg_t* req = (raft_msg_t*)malloc(sizeof(raft_msg_t) + sizeof(raft_request_vote_req_t));
+    assert(req != NULL);
     
-    raft_request_vote_resp_t resp = {0};
+    req->term = 1;
+    req->sender_node_id = 2;
+    req->rpc_type = RAFT_RPC_REQUEST_VOTE;
     
-    int result = raft_handle_request_vote(follower, &req, &resp);
+    raft_request_vote_req_t* req_data = (raft_request_vote_req_t*)req->data;
+    req_data->last_log_index = 0;
+    req_data->last_log_term = 0;
+    
+    // Create response message
+    raft_msg_t* resp = (raft_msg_t*)malloc(sizeof(raft_msg_t) + sizeof(raft_request_vote_resp_t));
+    assert(resp != NULL);
+    
+    // Process the request
+    int result = raft_handle_request_vote(follower, req, resp);
     assert(result == 0);
-    assert(resp.vote_granted == true);
+    
+    // Check response
+    raft_request_vote_resp_t* resp_data = (raft_request_vote_resp_t*)resp->data;
+    assert(resp_data->vote_granted == true);
     assert(follower->voted_for == 2);
     
+    free(req);
+    free(resp);
     raft_destroy(follower);
     printf("Basic RequestVote test passed\n");
 }
@@ -336,20 +396,33 @@ void test_request_vote_term_check(void) {
     assert(follower != NULL);
     follower->current_term = 2;  // Higher term
     
-    // Request with lower term
-    raft_request_vote_req_t req = {0};
-    req.term = 1;
-    req.candidate_id = 2;
-    req.last_log_index = 0;
-    req.last_log_term = 0;
+    // Create request message with lower term
+    raft_msg_t* req = (raft_msg_t*)malloc(sizeof(raft_msg_t) + sizeof(raft_request_vote_req_t));
+    assert(req != NULL);
     
-    raft_request_vote_resp_t resp = {0};
+    req->term = 1;  // Lower term
+    req->sender_node_id = 2;
+    req->rpc_type = RAFT_RPC_REQUEST_VOTE;
     
-    int result = raft_handle_request_vote(follower, &req, &resp);
+    raft_request_vote_req_t* req_data = (raft_request_vote_req_t*)req->data;
+    req_data->last_log_index = 0;
+    req_data->last_log_term = 0;
+    
+    // Create response message
+    raft_msg_t* resp = (raft_msg_t*)malloc(sizeof(raft_msg_t) + sizeof(raft_request_vote_resp_t));
+    assert(resp != NULL);
+    
+    // Process the request
+    int result = raft_handle_request_vote(follower, req, resp);
     assert(result == 0);
-    assert(resp.vote_granted == false);
-    assert(resp.term == 2);
     
+    // Check response
+    assert(resp->term == 2);  // Should return current term
+    raft_request_vote_resp_t* resp_data = (raft_request_vote_resp_t*)resp->data;
+    assert(resp_data->vote_granted == false);
+    
+    free(req);
+    free(resp);
     raft_destroy(follower);
     printf("RequestVote term check test passed\n");
 }
@@ -362,30 +435,43 @@ void test_request_vote_already_voted(void) {
     follower->current_term = 1;
     follower->voted_for = 2;  // Already voted for node 2
     
-    // Different candidate with same term
-    raft_request_vote_req_t req = {0};
-    req.term = 1;
-    req.candidate_id = 3;  // Different candidate
-    req.last_log_index = 0;
-    req.last_log_term = 0;
+    // Create request message from different candidate
+    raft_msg_t* req = (raft_msg_t*)malloc(sizeof(raft_msg_t) + sizeof(raft_request_vote_req_t));
+    assert(req != NULL);
     
-    raft_request_vote_resp_t resp = {0};
+    req->term = 1;
+    req->sender_node_id = 3;  // Different candidate
+    req->rpc_type = RAFT_RPC_REQUEST_VOTE;
     
-    int result = raft_handle_request_vote(follower, &req, &resp);
+    raft_request_vote_req_t* req_data = (raft_request_vote_req_t*)req->data;
+    req_data->last_log_index = 0;
+    req_data->last_log_term = 0;
+    
+    // Create response message
+    raft_msg_t* resp = (raft_msg_t*)malloc(sizeof(raft_msg_t) + sizeof(raft_request_vote_resp_t));
+    assert(resp != NULL);
+    
+    // Process the request
+    int result = raft_handle_request_vote(follower, req, resp);
     assert(result == 0);
-    assert(resp.vote_granted == false);  // Should not grant vote
-    assert(follower->voted_for == 2);    // Still voted for original candidate
     
+    // Check response
+    raft_request_vote_resp_t* resp_data = (raft_request_vote_resp_t*)resp->data;
+    assert(resp_data->vote_granted == false);  // Should not grant vote
+    assert(follower->voted_for == 2);          // Still voted for original candidate
+    
+    free(req);
+    free(resp);
     raft_destroy(follower);
     printf("RequestVote already voted test passed\n");
 }
 
 void test_request_vote_log_check(void) {
     printf("Testing RequestVote log checking...\n");
-    
+
     raft_node_t* follower = raft_init(1);
     assert(follower != NULL);
-    
+
     // Add an entry to follower's log with term 2
     const char* test_data = "test";
     raft_entry_t* entry = raft_create_entry(
@@ -397,21 +483,35 @@ void test_request_vote_log_check(void) {
     assert(entry != NULL);
     int result = raft_append_entry(follower, entry);
     assert(result == 0);
-    free(entry);
-    
-    // Candidate with older log (lower term)
-    raft_request_vote_req_t req = {0};
-    req.term = 3;  // Higher term
-    req.candidate_id = 2;
-    req.last_log_index = 1;
-    req.last_log_term = 1;  // Lower term than follower's log
-    
-    raft_request_vote_resp_t resp = {0};
-    
-    result = raft_handle_request_vote(follower, &req, &resp);
+    // raft_free_entry(entry); // <--- REMOVE THIS LINE
+
+    // Create request message from candidate with older log
+    raft_msg_t* req = (raft_msg_t*)malloc(sizeof(raft_msg_t) + sizeof(raft_request_vote_req_t));
+    assert(req != NULL);
+
+    req->term = 3;  // Higher term
+    req->sender_node_id = 2;
+    req->rpc_type = RAFT_RPC_REQUEST_VOTE;
+
+    raft_request_vote_req_t* req_data = (raft_request_vote_req_t*)req->data;
+    req_data->last_log_index = 1;
+    req_data->last_log_term = 1;  // Lower term than follower's log
+
+    // Create response message
+    raft_msg_t* resp = (raft_msg_t*)malloc(sizeof(raft_msg_t) + sizeof(raft_request_vote_resp_t));
+    assert(resp != NULL);
+
+    // Process the request
+    result = raft_handle_request_vote(follower, req, resp);
     assert(result == 0);
-    assert(resp.vote_granted == false);  // Should reject due to outdated log
-    
+
+    // Check response
+    raft_request_vote_resp_t* resp_data = (raft_request_vote_resp_t*)resp->data;
+    assert(resp_data->vote_granted == false);  // Should reject due to outdated log
+
+    free(req);
+    free(resp);
+    free(entry);
     raft_destroy(follower);
     printf("RequestVote log check test passed\n");
 }
@@ -436,11 +536,20 @@ void test_start_election(void) {
     printf("Start election test passed\n");
 }
 
-void test_apply_committed_entries() {
+void test_apply_committed_entries(void) {
     printf("Testing apply committed entries...\n");
     
-    // TODO: Implement test for applying committed entries
+    // This is a placeholder for the state machine test
+    // State machine implementation would be needed to fully test this
     
+    raft_node_t* node = raft_init(1);
+    assert(node != NULL);
+    
+    // Test without state machine (should fail gracefully)
+    int result = raft_apply_committed_entries(node);
+    assert(result == -1);
+    
+    raft_destroy(node);
     printf("Apply committed entries test passed\n");
 }
 
@@ -457,7 +566,6 @@ int main(void) {
     
     test_append_entries_basic();
     test_append_entries_term_check();
-    
     test_append_entries_log_matching();
     
     test_request_vote_basic();

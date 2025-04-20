@@ -22,7 +22,8 @@
         "stdbool.h": "c",
         "disk_map.h": "c",
         "pthread.h": "c",
-        "xxhash.h": "c"
+        "xxhash.h": "c",
+        "log_file.h": "c"
     },
     "cSpell.words": [
         "pthread"

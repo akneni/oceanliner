@@ -21,7 +21,6 @@ static inline int64_t find_free_value_slot(uint8_t* ivs_len_arr) {
     return -1;
 }
 
-// TODO: choose a real 128 bit hash function
 static XXH128_hash_t hash(const char* key) {
     size_t key_length = strlen(key);
     assert(key_length <= MAX_KEY_LEN);
@@ -52,7 +51,7 @@ static inline bool key_hash_cmp(const XXH128_hash_t* h1, const XXH128_hash_t* h2
 
         return _mm_testc_si128(zero, cmp) == 1;
     #else
-        return (h1->high64 == h2->high64 && h1->low64 == h2->low64);
+        return XXH128_cmp(h1, h2) == 0;
     #endif
 }
 
@@ -79,6 +78,7 @@ static bool __kv_store_find_entry(
 
     for (uint64_t i = 0; i < KEY_NUM_SLOTS; i++) {
         uint64_t curr_slot_idx = (slot_idx+i) & 0b0111111;
+        assert(curr_slot_idx < KVE_NUM_SLOTS);
 
         if (key_hash_cmp(key_hash, &page_ptr->key_hash[curr_slot_idx]) || page_ptr->cbo_and_ivs[curr_slot_idx] != UINT64_MAX) {
             *slot_idx_output = curr_slot_idx;
@@ -113,15 +113,18 @@ static bool __kv_store_find_empty_slot(
     pthread_mutex_lock(&page_ptr->latch);
 
     for (int i = 0; i < KEY_NUM_SLOTS; i++) {
-        uint64_t curr_slot_offset = (slot_idx+i) & 0b0111111;
+        uint64_t curr_slot_idx = (slot_idx+i) & 0b0111111;
+        assert(curr_slot_idx < KVE_NUM_SLOTS);
 
         if (page_ptr->cbo_and_ivs[i] == UINT64_MAX) {
-            if (*slot_idx_output == UINT64_MAX) *slot_idx_output = curr_slot_offset;
+            if (*slot_idx_output == UINT64_MAX) {
+                *slot_idx_output = curr_slot_idx;
+            }
             continue;
         }
 
-        if (key_hash_cmp(key_hash, &page_ptr->key_hash[curr_slot_offset])) {
-            *slot_idx_output = curr_slot_offset;
+        if (key_hash_cmp(key_hash, &page_ptr->key_hash[curr_slot_idx])) {
+            *slot_idx_output = curr_slot_idx;
             return true;
         }
     }
@@ -134,7 +137,9 @@ static bool __kv_store_find_empty_slot(
 }
 
 static inline uint64_t extract_ivs(uint64_t num) {
-    return num & 0xFF; // Extract lower 8 bits
+    uint64_t ivs = num & 0xFF; // Extract lower 8 bits
+    assert(ivs < IVS_NUM_SLOTS || ivs == UINT8_MAX);
+    return ivs;
 }
 
 static inline uint64_t extract_cbo(uint64_t num) {
@@ -174,6 +179,8 @@ kv_store_t kv_store_init(const char* filepath, uint8_t* log_file) {
 /// @param val_output_buffer
 /// @return The length of th evalue when the key exists and -1 if it doesn't exist
 uint8_t* kv_store_get(const kv_store_t* map, const char* key, int64_t* value_length) {
+    assert(strlen(key) <= MAX_KEY_LEN);
+
     XXH128_hash_t key_hash = hash(key);
     uint64_t page_idx;
     uint64_t slot_idx;
@@ -192,6 +199,8 @@ uint8_t* kv_store_get(const kv_store_t* map, const char* key, int64_t* value_len
     uint64_t ivs = extract_ivs(page->cbo_and_ivs[slot_idx]);
 
     if (ivs != UINT8_MAX) {
+        assert(ivs < IVS_NUM_SLOTS);
+
         inline_val_slot* value_ptr = &page->inline_vals[ivs];
 
         uint8_t* value_data = (uint8_t*) malloc(page->inline_vals_len[ivs]);
@@ -221,6 +230,10 @@ uint8_t* kv_store_get(const kv_store_t* map, const char* key, int64_t* value_len
 /// @param value_len
 /// @return
 int64_t kv_store_set(kv_store_t* map, uint64_t cmd_byte_offset, const char* key, uint8_t* value, size_t value_len) {
+    assert(strlen(key) <= MAX_KEY_LEN);
+    assert(cmd_byte_offset < (UINT64_MAX >> sizeof(uint8_t)));
+    assert(value_len <= MAX_VAL_LEN);
+
     XXH128_hash_t key_hash = hash(key);
     uint64_t page_idx;
     uint64_t slot_idx;
@@ -241,7 +254,7 @@ int64_t kv_store_set(kv_store_t* map, uint64_t cmd_byte_offset, const char* key,
 
     // Inline the value if it fits
     if (value_len <= IKVS_SIZE) {
-        assert(IKVS_SIZE <= UINT8_MAX);
+        assert(IKVS_SIZE < UINT8_MAX);
 
         int64_t free_ivs = find_free_value_slot(page->inline_vals_len);
 
@@ -253,8 +266,10 @@ int64_t kv_store_set(kv_store_t* map, uint64_t cmd_byte_offset, const char* key,
         }
     }
 
-    assert(ivs <= UINT8_MAX);
+    assert(ivs < IVS_NUM_SLOTS || ivs == UINT8_MAX);
+
     page->cbo_and_ivs[slot_idx] = (cbo << 8) | ivs;
+    assert(page->cbo_and_ivs[slot_idx] != UINT64_MAX);
 
     pthread_mutex_unlock(&page->latch);
     return 0;
@@ -265,6 +280,8 @@ int64_t kv_store_set(kv_store_t* map, uint64_t cmd_byte_offset, const char* key,
 /// @param key
 /// @return
 int64_t kv_store_delete(kv_store_t* map, const char* key) {
+    assert(strlen(key) <= MAX_KEY_LEN);
+
     XXH128_hash_t key_hash = hash(key);
     uint64_t page_idx;
     uint64_t slot_idx;

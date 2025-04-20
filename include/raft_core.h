@@ -89,11 +89,11 @@ typedef struct {
 
 // AppendEntries RPC structures
 typedef struct {
-    uint64_t prev_log_index;  // Index of log entry before new ones
-    uint64_t prev_log_term;   // Term of prev_log_index entry
-    uint64_t leader_commit;   // Leader's commitIndex
-    size_t n_entries;         // Number of entries
-    uint8_t entries[];        // Log entries to store
+    uint64_t prev_log_index;   // Index of log entry before new ones
+    uint64_t prev_log_term;    // Term of prev_log_index entry
+    uint64_t leader_commit;    // Leader's commitIndex
+    size_t n_entries;          // Number of entries
+    kvs_batch_cmd_t entries;   // Log entries to store 
 } raft_append_entries_req_t;
 
 typedef struct {
@@ -113,6 +113,24 @@ typedef struct {
 typedef struct {
     bool vote_granted;    // True means candidate received vote
 } raft_request_vote_resp_t;
+
+// RPC Message Types
+typedef enum {
+    RAFT_RPC_APPEND_ENTRIES,
+    RAFT_RPC_REQUEST_VOTE,
+    RAFT_RPC_RESP_APPEND_ENTRIES,
+    RAFT_RPC_RESP_REQUEST_VOTE
+} raft_rpc_type_t;
+
+// Wrapper struct of any message sent between nodes in the RSM
+typedef struct {
+    uint64_t body_length;
+    uint64_t term;
+    uint64_t sender_node_id;
+    raft_rpc_type_t rpc_type;
+    uint8_t padding[7];
+    uint64_t data[];
+} raft_msg_t;
 
 // Core functions
 raft_node_t* raft_init(uint32_t node_id);
@@ -137,28 +155,13 @@ int raft_replicate_logs(raft_node_t* node);
 
 // AppendEntries RPC handler
 int raft_handle_append_entries(raft_node_t* node,
-                             const raft_append_entries_req_t* req,
-                             raft_append_entries_resp_t* resp);
-
-// RPC Message Types
-typedef enum {
-    RAFT_RPC_APPEND_ENTRIES,
-    RAFT_RPC_REQUEST_VOTE
-} raft_rpc_type_t;
-
-typedef struct {
-    uint64_t body_length;
-    uint64_t term;
-    uint64_t sender_node_id;
-    raft_rpc_type_t rpc_type;
-    uint8_t padding[7];
-    uint8_t data[];
-} raft_msg_t;
+                             const raft_msg_t* req,
+                             raft_msg_t* resp);
 
 // RPC handler functions
 int raft_handle_request_vote(raft_node_t* node,
-                           const raft_request_vote_req_t* req,
-                           raft_request_vote_resp_t* resp);
+                           const raft_msg_t* req,
+                           raft_msg_t* resp);
 
 // RPC sender functions
 int raft_send_append_entries(raft_node_t* node,

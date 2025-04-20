@@ -242,15 +242,21 @@ int raft_replicate_logs(raft_node_t* node) {
 
 // AppendEntries RPC handler
 int raft_handle_append_entries(raft_node_t* node,
-                             const raft_append_entries_req_t* req,
-                             raft_append_entries_resp_t* resp) {
+                             const raft_msg_t* req,
+                             raft_msg_t* resp) {
     if (!node || !req || !resp) return -1;
-    
+    assert(req->rpc_type == RAFT_RPC_APPEND_ENTRIES);
+
     pthread_mutex_lock(&node->mutex);
-    
+
     // Initialize response
     resp->term = node->current_term;
-    resp->success = false;
+    
+    resp->rpc_type = RAFT_RPC_RESP_APPEND_ENTRIES;
+    raft_append_entries_resp_t* resp_data = (raft_append_entries_resp_t*) resp->data;
+    raft_append_entries_req_t* req_data = (raft_append_entries_req_t*) req->data;
+
+    resp_data->success = false;
     
     // 1. Reply false if term < currentTerm
     if (req->term < node->current_term) {
@@ -263,29 +269,28 @@ int raft_handle_append_entries(raft_node_t* node,
         node->current_term = req->term;
         node->voted_for = 0;
         node->state = RAFT_STATE_FOLLOWER;
-    }
-    
+    }    
     // 3. Reset election timeout
     node->last_heartbeat = time(NULL);
-    node->leader_id = req->leader_id;
+    node->leader_id = req->sender_node_id;
     
     // 4. Check log consistency
-    if (req->prev_log_index > 0) {
+    if (req_data->prev_log_index > 0) {
         // Check if we have enough entries
-        if (req->prev_log_index > node->log->count) {
+        if (req_data->prev_log_index > node->log->count) {
             pthread_mutex_unlock(&node->mutex);
             return 0; // Not enough entries
         }
         
         // Check term matches
-        if (node->log->entries[req->prev_log_index - 1].term != req->prev_log_term) {
+        if (node->log->entries[req_data->prev_log_index - 1].term != req_data->prev_log_term) {
             pthread_mutex_unlock(&node->mutex);
             return 0; // Term mismatch
         }
     }
     
     // 5. Success - log is consistent
-    resp->success = true;
+    resp_data->success = true;
     
     pthread_mutex_unlock(&node->mutex);
     return 0;
@@ -293,15 +298,20 @@ int raft_handle_append_entries(raft_node_t* node,
 
 // RequestVote RPC handler
 int raft_handle_request_vote(raft_node_t* node,
-                           const raft_request_vote_req_t* req,
-                           raft_request_vote_resp_t* resp) {
+                           const raft_msg_t* req,
+                           raft_msg_t* resp) {
     if (!node || !req || !resp) return -1;
     
     pthread_mutex_lock(&node->mutex);
-    
+
+    resp->rpc_type = RAFT_RPC_RESP_REQUEST_VOTE;
+    raft_request_vote_req_t* req_data = (raft_request_vote_req_t*) req->data;
+    raft_request_vote_resp_t* resp_data = (raft_request_vote_resp_t*) resp->data;
+
+
     // Initialize response
     resp->term = node->current_term;
-    resp->vote_granted = false;
+    resp_data->vote_granted = false;
     
     // 1. Reply false if term < currentTerm
     if (req->term < node->current_term) {
@@ -326,16 +336,16 @@ int raft_handle_request_vote(raft_node_t* node,
                         node->log->entries[last_idx - 1].term : 0;
     
     // Check if candidate's log is at least as up-to-date as ours
-    if (req->last_log_term > last_term) {
+    if (req_data->last_log_term > last_term) {
         log_ok = true;  // Candidate has higher term
-    } else if (req->last_log_term == last_term && 
-               req->last_log_index >= last_idx) {
+    } else if (req_data->last_log_term == last_term && 
+            req_data->last_log_index >= last_idx) {
         log_ok = true;  // Same term but equal or longer log
     }
     
-    if ((node->voted_for == 0 || node->voted_for == req->candidate_id) && log_ok) {
-        resp->vote_granted = true;
-        node->voted_for = req->candidate_id;
+    if ((node->voted_for == 0 || node->voted_for == req->sender_node_id) && log_ok) {
+        resp_data->vote_granted = true;
+        node->voted_for = req->sender_node_id;
         
         // Reset election timer since we just voted
         node->last_heartbeat = time(NULL);
@@ -349,26 +359,45 @@ int raft_handle_request_vote(raft_node_t* node,
 int raft_send_append_entries(raft_node_t* node,
                            uint32_t target_id,
                            raft_entry_t* entries,
-                           size_t n_entries) {
+                           size_t entries_len) {
     if (!node || node->state != RAFT_STATE_LEADER) return -1;
     
     pthread_mutex_lock(&node->mutex);
     
-    // Prepare request
-    raft_append_entries_req_t req = {
+    size_t msg_body_len = entries_len + 2*sizeof(kvsb_header_t);
+
+    raft_msg_t* req = (raft_msg_t*) malloc(msg_body_len + sizeof(raft_msg_t));
+
+
+    *req = (raft_msg_t) {
         .term = node->current_term,
-        .leader_id = node->node_id,
-        .prev_log_index = node->next_index[target_id] - 1,
-        .prev_log_term = (req.prev_log_index > 0) ? 
-            node->log->entries[req.prev_log_index - 1].term : 0,
-        .entries = entries,
-        .n_entries = n_entries,
-        .leader_commit = node->commit_index
+        .sender_node_id = node->node_id,
+        .rpc_type = RAFT_RPC_APPEND_ENTRIES,
+        .body_length = (entries_len + 2*sizeof(kvsb_header_t)),
     };
+
+    raft_append_entries_req_t* req_data = (raft_append_entries_req_t*) req->data;
+    req_data->prev_log_term = (node->current_term == 0) ? 0 : node->current_term - 1;
+    req_data->prev_log_index = (uint64_t) node->next_index - 1;
+    req_data->leader_commit = node->commit_index;
+
+
+    kvsb_header_t header = {
+        .data_length = entries_len,
+        .log_index = (uint64_t) node->next_index,
+        .term = node->current_term,
+    };
+    kvsb_header_calc_checksum(&header);
+
+    req_data->entries.header = header;
+    *((kvsb_header_t*) (&req_data->entries.data[entries_len])) = header;
+
+    memcpy(req_data->entries.data, entries, entries_len);
     
+
     // Note: Actual network send would happen here
     // For now, we just update our local state
-    node->next_index[target_id] += n_entries;
+    node->next_index[target_id] += entries_len;
     
     pthread_mutex_unlock(&node->mutex);
     return 0;
@@ -381,14 +410,17 @@ int raft_send_request_vote(raft_node_t* node,
     
     pthread_mutex_lock(&node->mutex);
     
-    // Prepare request
-    raft_request_vote_req_t req = {
+    raft_msg_t* req = (raft_msg_t*) malloc(sizeof(raft_msg_t) + sizeof(raft_request_vote_req_t));
+    *req = (raft_msg_t) {
         .term = node->current_term,
-        .candidate_id = node->node_id,
-        .last_log_index = node->log->count,
-        .last_log_term = (node->log->count > 0) ?
-            node->log->entries[node->log->count - 1].term : 0
+        .body_length = sizeof(raft_request_vote_req_t),
+        .rpc_type = RAFT_RPC_REQUEST_VOTE,
+        .sender_node_id = node->node_id,
     };
+
+    raft_request_vote_req_t* req_data = (raft_request_vote_req_t*) req;
+    req_data->last_log_index = node->log->count;
+    req_data->last_log_term = (node->log->count > 0) ? node->log->entries[node->log->count - 1].term : 0;
     
     // Note: Actual network send would happen here
     
@@ -410,12 +442,13 @@ int raft_start_election(raft_node_t* node) {
     node->last_heartbeat = time(NULL);  // Reset election timer
     
     // Prepare RequestVote request
-    raft_request_vote_req_t req = {0};
-    req.term = node->current_term;
-    req.candidate_id = node->node_id;
-    req.last_log_index = node->log->count;
-    req.last_log_term = (req.last_log_index > 0) ? 
-                      node->log->entries[req.last_log_index - 1].term : 0;
+    // raft_request_vote_req_t req = {0};
+    // req.term = node->current_term;
+    // req.candidate_id = node->node_id;
+    // req.last_log_index = node->log->count;
+    // req.last_log_term = (req.last_log_index > 0) ? 
+    //                   node->log->entries[req.last_log_index - 1].term : 0;
+    // ^^ this code is re-reimplementing the logic in `raft_send_request_vote()`. We probably don't need to do this twice
     
     pthread_mutex_unlock(&node->mutex);
     
@@ -437,34 +470,34 @@ int raft_apply_committed_entries(raft_node_t* node) {
         return 0;  // Nothing to apply
     }
     
-    // Apply all committed but not yet applied entries
-    for (uint64_t i = node->last_applied + 1; i <= node->commit_index; i++) {
-        if (i > node->log->count) break;  // Safety check
+    // // Apply all committed but not yet applied entries
+    // for (uint64_t i = node->last_applied + 1; i <= node->commit_index; i++) {
+    //     if (i > node->log->count) break;  // Safety check
         
-        raft_entry_t* entry = &node->log->entries[i - 1];
+    //     raft_entry_t* entry = &node->log->entries[i - 1];
         
-        // Convert log entry to command
-        // This is where you'd parse the entry data into a command
-        kvs_command_t cmd = {0};
+    //     // Convert log entry to command
+    //     // This is where you'd parse the entry data into a command
+    //     kvs_command_t cmd = {0};
         
-        // TODO: Implement entry data parsing to command
+    //     // TODO: Implement entry data parsing to command
         
-        // Apply to state machine
-        uint8_t* result = NULL;
-        size_t result_size = 0;
+    //     // Apply to state machine
+    //     uint8_t* result = NULL;
+    //     size_t result_size = 0;
         
-        if (node->state_machine->apply(node->state_machine->ctx, &cmd, &result, &result_size) != 0) {
-            // Handle apply error
-            pthread_mutex_unlock(&node->mutex);
-            return -1;
-        }
+    //     if (node->state_machine->apply(node->state_machine->ctx, &cmd, &result, &result_size) != 0) {
+    //         // Handle apply error
+    //         pthread_mutex_unlock(&node->mutex);
+    //         return -1;
+    //     }
         
-        // Free result if needed
-        if (result) free(result);
+    //     // Free result if needed
+    //     if (result) free(result);
         
-        // Update last applied
-        node->last_applied = i;
-    }
+    //     // Update last applied
+    //     node->last_applied = i;
+    // }
     
     pthread_mutex_unlock(&node->mutex);
     return 0;
