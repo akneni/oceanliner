@@ -17,6 +17,15 @@
 int kv_state_machine_apply(void* ctx, const kvs_command_t* cmd, uint8_t** result, size_t* result_size);
 
 /**
+ * @brief Create a Raft log entry from a command
+ * 
+ * @param term The current term
+ * @param cmd The command to convert to a log entry
+ * @return raft_entry_t* New log entry or NULL on error
+ */
+raft_entry_t* raft_create_entry_from_command(uint64_t term, const kvs_command_t* cmd);
+
+/**
  * @brief Create a key-value store state machine
  * 
  * @param kv_store The key-value store to use
