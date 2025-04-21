@@ -1,4 +1,4 @@
-TODO: fix this
+// TODO: fix this
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,7 +9,6 @@ TODO: fix this
 
 #include "../include/globals.h"
 #include "../include/cluster.h"
-#include "../include/disk_map.h"
 #include "../include/log_file.h"
 
 // Function to align pointers to specified alignment

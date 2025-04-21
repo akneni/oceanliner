@@ -186,4 +186,5 @@ int raft_stop_apply_thread(raft_node_t* node);
 // State machine initialization
 int raft_init_state_machine(raft_node_t* node, kv_store_t* kv_store);
 
-#endif
+#endif // RAFT_CORE_H
+

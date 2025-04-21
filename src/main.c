@@ -4,6 +4,7 @@
 #include <memory.h>
 #include <string.h>
 #include <fcntl.h>
+#include <unistd.h>
 
 // #include "kiln_string.h"
 
@@ -73,12 +74,35 @@ uint64_t matchIndex = 0;
 
 // }
 
+void init_logfile(char* logfile_name) {
+	int32_t exists = access(logfile_name, F_OK);
+	if (!exists) {
+		int32_t fd = open(logfile_name, O_CREAT) ;
+		close(fd);
+	}
 
+	logfile_fd_mut = open(logfile_name, O_RDWR | O_SYNC);
 
-#include "../include/xxhash.h"
+	for(int i = 0; i < LF_NUM_FDS; i++) {
+		logfile_fds_ro[i] = open(logfile_name, O_RDONLY);
+	}
+
+	assert(logfile_fd_mut > 0);
+}
 
 int main(int argc, char** argv) {
+	if (argc != 3) {
+		perror("invalid number of arguments");
+		exit(1);
+	}
+
+	uint64_t addr_index = (uint64_t) strtoll(argv[1], NULL, 10);
+
+
+
+	printf("logfile: %s\n", argv[2]);
 	printf("%lu\n", sizeof(kvs_page_t));
 
+	assert(addr_index - addr_index == 0);
 	return 0;
 }
