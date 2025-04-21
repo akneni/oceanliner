@@ -183,4 +183,7 @@ int raft_start_apply_thread(raft_node_t* node);
 // Function to stop background apply thread
 int raft_stop_apply_thread(raft_node_t* node);
 
+// State machine initialization
+int raft_init_state_machine(raft_node_t* node, kv_store_t* kv_store);
+
 #endif

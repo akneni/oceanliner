@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include "../include/raft_core.h"
+#include "../include/kv_state_machine.h"
 
 #define MILLISECONDS_PER_SECOND 1000
 #define INITIAL_LOG_CAPACITY 1024
@@ -470,34 +471,47 @@ int raft_apply_committed_entries(raft_node_t* node) {
         return 0;  // Nothing to apply
     }
     
-    // // Apply all committed but not yet applied entries
-    // for (uint64_t i = node->last_applied + 1; i <= node->commit_index; i++) {
-    //     if (i > node->log->count) break;  // Safety check
+    // Apply all committed but not yet applied entries
+    for (uint64_t i = node->last_applied + 1; i <= node->commit_index; i++) {
+        if (i > node->log->count) break;  // Safety check
         
-    //     raft_entry_t* entry = &node->log->entries[i - 1];
+        raft_entry_t* entry = &node->log->entries[i - 1];
         
-    //     // Convert log entry to command
-    //     // This is where you'd parse the entry data into a command
-    //     kvs_command_t cmd = {0};
+        // Skip entries that aren't commands
+        if (entry->type != RAFT_ENTRY_COMMAND) {
+            node->last_applied = i;
+            continue;
+        }
         
-    //     // TODO: Implement entry data parsing to command
+        // Convert log entry to command
+        kvs_command_t* cmd = (kvs_command_t*)entry->data;
         
-    //     // Apply to state machine
-    //     uint8_t* result = NULL;
-    //     size_t result_size = 0;
+        // Apply to state machine
+        uint8_t* result = NULL;
+        size_t result_size = 0;
         
-    //     if (node->state_machine->apply(node->state_machine->ctx, &cmd, &result, &result_size) != 0) {
-    //         // Handle apply error
-    //         pthread_mutex_unlock(&node->mutex);
-    //         return -1;
-    //     }
+        int apply_result = node->state_machine->apply(
+            node->state_machine->ctx,
+            cmd,
+            &result,
+            &result_size
+        );
         
-    //     // Free result if needed
-    //     if (result) free(result);
+        // Handle apply result
+        if (apply_result != 0) {
+            fprintf(stderr, "Failed to apply command at index %lu, error: %d\n", 
+                    i, apply_result);
+            // In production, consider more robust error handling
+        }
         
-    //     // Update last applied
-    //     node->last_applied = i;
-    // }
+        // Free result if it was allocated
+        if (result) {
+            free(result);
+        }
+        
+        // Update last applied
+        node->last_applied = i;
+    }
     
     pthread_mutex_unlock(&node->mutex);
     return 0;
@@ -554,5 +568,30 @@ int raft_stop_apply_thread(raft_node_t* node) {
     pthread_mutex_unlock(&node->mutex);
     
     pthread_join(node->apply_thread, NULL);
+    return 0;
+}
+
+// Initialize the state machine with a key-value store
+int raft_init_state_machine(raft_node_t* node, kv_store_t* kv_store) {
+    if (!node || !kv_store) return -1;
+    
+    pthread_mutex_lock(&node->mutex);
+    
+    // Create state machine
+    raft_state_machine_t* state_machine = kv_state_machine_create(kv_store);
+    if (!state_machine) {
+        pthread_mutex_unlock(&node->mutex);
+        return -1;
+    }
+    
+    // Free any existing state machine
+    if (node->state_machine) {
+        kv_state_machine_destroy(node->state_machine);
+    }
+    
+    // Set the new state machine
+    node->state_machine = state_machine;
+    
+    pthread_mutex_unlock(&node->mutex);
     return 0;
 }
