@@ -5,7 +5,10 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <pthread.h>
-#include <immintrin.h>
+
+#ifdef __AVX2__
+    #include <immintrin.h>
+#endif
 
 #include "../include/globals.h"
 #include "../include/kv_store.h"
