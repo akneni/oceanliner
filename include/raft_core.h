@@ -9,6 +9,7 @@
 #include "../include/globals.h"
 #include "../include/log_file.h"
 #include "../include/xxhash.h"
+#include "command_batcher.h"
 
 // Constants
 #define MAX_NODES 5
@@ -85,6 +86,9 @@ typedef struct {
     
     // Thread safety
     pthread_mutex_t mutex;
+    
+    // Command batching
+    CommandBatcher command_batcher;
 } raft_node_t;
 
 // AppendEntries RPC structures
@@ -185,6 +189,9 @@ int raft_stop_apply_thread(raft_node_t* node);
 
 // State machine initialization
 int raft_init_state_machine(raft_node_t* node, kv_store_t* kv_store);
+
+// Client command handling
+int raft_handle_client_command(raft_node_t* node, const kvs_command_t* cmd);
 
 #endif // RAFT_CORE_H
 

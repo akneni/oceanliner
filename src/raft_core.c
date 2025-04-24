@@ -4,9 +4,17 @@
 
 #include "../include/raft_core.h"
 #include "../include/kv_state_machine.h"
+#include "../include/command_batcher.h"
 
 #define MILLISECONDS_PER_SECOND 1000
 #define INITIAL_LOG_CAPACITY 1024
+
+// Forward declarations
+static raft_log_t* log_init(void);
+static void log_destroy(raft_log_t* log);
+static void* apply_thread_func(void* arg);
+static int apply_command_batch(raft_node_t* node, const uint8_t* batch_data, size_t batch_size);
+static void process_raft_batch(CommandBatch* batch, void* context);
 
 static int generate_timeout(void) {
     return ELECTION_TIMEOUT_MIN + 
@@ -77,6 +85,10 @@ raft_node_t* raft_init(uint32_t node_id) {
     node->state_machine = NULL;  // Set separately
     node->applying_entries = false;
     
+    // Initialize command batcher
+    command_batcher_init(&node->command_batcher, DEFAULT_BATCH_DELAY_MS, 
+                        process_raft_batch, node);
+    
     return node;
 }
 
@@ -90,6 +102,10 @@ void raft_destroy(raft_node_t* node) {
     
     // State machine is destroyed separately
     
+    // Stop command batcher
+    command_batcher_stop(&node->command_batcher);
+    command_batcher_destroy(&node->command_batcher);
+    
     log_destroy(node->log);
     pthread_mutex_destroy(&node->mutex);
     free(node);
@@ -99,6 +115,12 @@ void raft_become_follower(raft_node_t* node, uint64_t term) {
     if (!node) return;
     
     pthread_mutex_lock(&node->mutex);
+    
+    // Stop the command batcher if we were leader
+    if (node->state == RAFT_STATE_LEADER) {
+        command_batcher_stop(&node->command_batcher);
+    }
+    
     node->state = RAFT_STATE_FOLLOWER;
     node->current_term = term;
     node->voted_for = 0;
@@ -106,6 +128,7 @@ void raft_become_follower(raft_node_t* node, uint64_t term) {
     node->leader_id = 0;
     node->election_timeout = generate_timeout();
     node->last_heartbeat = time(NULL);
+    
     pthread_mutex_unlock(&node->mutex);
 }
 
@@ -134,6 +157,10 @@ void raft_become_leader(raft_node_t* node) {
         node->next_index[i] = node->log->count + 1;
         node->match_index[i] = 0;
     }
+    
+    // Start the command batcher when becoming leader
+    command_batcher_start(&node->command_batcher);
+    
     pthread_mutex_unlock(&node->mutex);
 }
 
@@ -483,30 +510,64 @@ int raft_apply_committed_entries(raft_node_t* node) {
             continue;
         }
         
-        // Convert log entry to command
-        kvs_command_t* cmd = (kvs_command_t*)entry->data;
-        
         // Apply to state machine
-        uint8_t* result = NULL;
-        size_t result_size = 0;
+        int apply_result = 0;
         
-        int apply_result = node->state_machine->apply(
-            node->state_machine->ctx,
-            cmd,
-            &result,
-            &result_size
-        );
+        const uint8_t* data = entry->data;
+        
+        // Check if this is a batch entry
+        if (entry->data_len > sizeof(kvs_command_t)) {
+            // Detect if this is a batch by checking if there appears to be
+            // multiple commands serialized together
+            const kvs_command_t* first_cmd = (const kvs_command_t*)data;
+            size_t first_cmd_len = kvs_command_len(first_cmd);
+            
+            if (first_cmd_len < entry->data_len) {
+                // This looks like a batch, apply as batch
+                apply_result = apply_command_batch(
+                    node,
+                    data,
+                    entry->data_len
+                );
+            } else {
+                // Apply as single command
+                uint8_t* result = NULL;
+                size_t result_size = 0;
+                
+                apply_result = node->state_machine->apply(
+                    node->state_machine->ctx,
+                    (kvs_command_t*)data,
+                    &result,
+                    &result_size
+                );
+                
+                // Free result if it was allocated
+                if (result) {
+                    free(result);
+                }
+            }
+        } else {
+            // Apply as single command
+            uint8_t* result = NULL;
+            size_t result_size = 0;
+            
+            apply_result = node->state_machine->apply(
+                node->state_machine->ctx,
+                (kvs_command_t*)data,
+                &result,
+                &result_size
+            );
+            
+            // Free result if it was allocated
+            if (result) {
+                free(result);
+            }
+        }
         
         // Handle apply result
         if (apply_result != 0) {
             fprintf(stderr, "Failed to apply command at index %lu, error: %d\n", 
                     i, apply_result);
-            // In production, consider more robust error handling
-        }
-        
-        // Free result if it was allocated
-        if (result) {
-            free(result);
         }
         
         // Update last applied
@@ -594,4 +655,109 @@ int raft_init_state_machine(raft_node_t* node, kv_store_t* kv_store) {
     
     pthread_mutex_unlock(&node->mutex);
     return 0;
+}
+
+// Add this new function for batch processing
+static void process_raft_batch(CommandBatch* batch, void* context) {
+    raft_node_t* node = (raft_node_t*)context;
+    
+    // Create a new log entry with the batch
+    raft_entry_t* entry = raft_create_entry(
+        node->current_term,
+        RAFT_ENTRY_COMMAND,
+        batch->commands,
+        batch->total_length
+    );
+    
+    // Append to log and start consensus
+    raft_append_entry(node, entry);
+    
+    // If leader, replicate to followers
+    if (node->state == RAFT_STATE_LEADER) {
+        raft_replicate_logs(node);
+    }
+    
+    // Free the entry (since raft_append_entry makes a copy)
+    free(entry->data);
+    free(entry);
+}
+
+// Add this function to handle client commands
+int raft_handle_client_command(raft_node_t* node, 
+                             const kvs_command_t* cmd) {
+    if (!node || !cmd) return -1;
+    
+    // Only leaders can process client commands
+    if (node->state != RAFT_STATE_LEADER) {
+        return -2; // Not leader
+    }
+    
+    // Calculate command size
+    size_t cmd_size = kvs_command_len(cmd);
+    
+    // Add to batch
+    if (!command_batcher_add_command(&node->command_batcher, 
+                                   (const uint8_t*)cmd, cmd_size)) {
+        // If the command is too large for batching, handle individually
+        // This is rare but possible for very large commands
+        
+        // Create a new log entry directly
+        raft_entry_t* entry = raft_create_entry(
+            node->current_term,
+            RAFT_ENTRY_COMMAND,
+            (const uint8_t*)cmd,
+            cmd_size
+        );
+        
+        // Start consensus for this entry
+        raft_append_entry(node, entry);
+        raft_replicate_logs(node);
+        
+        // Free the entry
+        free(entry->data);
+        free(entry);
+    }
+    
+    return 0;
+}
+
+// Function to apply a batch of commands to state machine
+static int apply_command_batch(raft_node_t* node, const uint8_t* batch_data, 
+                             size_t batch_size) {
+    if (!node || !node->state_machine || !batch_data || batch_size == 0) return -1;
+    
+    size_t offset = 0;
+    int apply_result = 0;
+    
+    // Process all commands in the batch
+    while (offset < batch_size) {
+        const kvs_command_t* cmd = (const kvs_command_t*)(batch_data + offset);
+        
+        // Apply each command using the standard apply function
+        uint8_t* cmd_result = NULL;
+        size_t cmd_result_size = 0;
+        
+        int cmd_apply_result = node->state_machine->apply(
+            node->state_machine->ctx,
+            cmd,
+            &cmd_result,
+            &cmd_result_size
+        );
+        
+        // Free any result from individual command
+        if (cmd_result) {
+            free(cmd_result);
+        }
+        
+        // Track if any command failed
+        if (cmd_apply_result != 0) {
+            apply_result = cmd_apply_result;
+        }
+        
+        // Move to next command
+        size_t cmd_size = kvs_command_len(cmd);
+        offset += cmd_size;
+    }
+    
+    return apply_result;
 }
