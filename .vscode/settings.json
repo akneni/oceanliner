@@ -23,7 +23,11 @@
         "disk_map.h": "c",
         "pthread.h": "c",
         "xxhash.h": "c",
-        "log_file.h": "c"
+        "log_file.h": "c",
+        "__node_handle": "c",
+        "queue": "c",
+        "spsc.h": "c",
+        "__threading_support": "c"
     },
     "cSpell.words": [
         "pthread"

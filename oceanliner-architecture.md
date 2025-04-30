@@ -79,7 +79,7 @@ struct HashMapMetadata {
     - The inline value slot will have a length (byte 63 for 64 bytes) and the first 63 bytes will be used to store the actual data. 
 
 - **Rehashing** => TBD. 
-- Servicing GET, SET, and DELETE operations will have roughly n/2 threads working on this where n is the number of logical cores on our machine. 
+- Servicing GET, SET, and DELETE operations will have roughly n/2 threads working on this where n is the number of logical cores on our machine.
 
 
 ## Handling Client Requests
@@ -89,6 +89,7 @@ struct HashMapMetadata {
 ## Network Protocol
 - Clients will send messages to the leader over UDP. This is because a process can only have 4096 files open (including TCP connections) at once. Since we're trying to create an extremely high throughput implementation of raft, it's likely that we will need to service more than 4K clients at a time. 
 - The nodes in the cluster will communicate with each other using TCP. 
+- The ports used for internal connections (TCP) will start at 8000. The ports used for client requests start at 9000.
 
 ## Raft Optimizations
 - Our implementation will include batching of AppendEntries requests to minimize the number of RPC calls and improve throughput.  Each batch of commands, once formed, is replicated in a single AppendEntries message. The `num_commands` and `command_length` fields in the log header are used to efficiently decode the batch during replay.

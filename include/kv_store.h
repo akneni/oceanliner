@@ -31,14 +31,6 @@
 // The number of inline value slots
 #define IVS_NUM_SLOTS 15
 
-// Key-value store operation
-typedef enum kvs_op_t {
-    CMD_NOP,
-    CMD_GET,
-    CMD_SET,
-    CMD_DELETE,
-} kvs_op_t;
-
 typedef struct inline_val_slot {
     uint8_t data[64];
 } inline_val_slot;
@@ -64,9 +56,11 @@ typedef struct kv_store_t {
 
     // mmap()ed hashmap data.
     kvs_page_t* data;
+
+    logfile_t* logfile;
 } kv_store_t;
 
-kv_store_t kv_store_init(const char* filepath, uint8_t* log_file);
+kv_store_t kv_store_init(const char* filepath, logfile_t* log_file);
 uint8_t* kv_store_get(const kv_store_t* map, const char* key, int64_t* value_length);
 int64_t kv_store_set(kv_store_t* map, uint64_t cmd_byte_offset, const char* key, uint8_t* value, size_t value_len);
 int64_t kv_store_delete(kv_store_t* map, const char* key);

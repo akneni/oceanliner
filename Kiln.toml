@@ -6,6 +6,6 @@ build_type = ["Exe"]
 
 [build_options]
 compiler_path = "gcc"
-debug_flags = ["-g", "-O0", "-Wall", "-fsanitize=undefined"]
-release_flags = ["-Wall", "-O3"]
+debug_flags = ["-g", "-O0", "-Wall", "-fsanitize=undefined", "-I/usr/include/glib-2.0", "-I/usr/lib/x86_64-linux-gnu/glib-2.0/include", "-lglib-2.0"]
+release_flags = ["-Wall", "-O3", "-I/usr/include/glib-2.0", "-I/usr/lib/x86_64-linux-gnu/glib-2.0/include", "-lglib-2.0"]
 

@@ -149,7 +149,7 @@ static inline uint64_t extract_cbo(uint64_t num) {
     return num >> 8; // Extract upper 56 bits
 }
 
-kv_store_t kv_store_init(const char* filepath, uint8_t* log_file) {
+kv_store_t kv_store_init(const char* filepath, logfile_t* log_file) {
     kv_store_t map;
 
     map.num_slots_log2 = 10;
@@ -173,6 +173,7 @@ kv_store_t kv_store_init(const char* filepath, uint8_t* log_file) {
         pthread_mutex_init(&page->latch, NULL);
     }
 
+    map.logfile = log_file;
     return map;
 }
 
@@ -216,7 +217,7 @@ uint8_t* kv_store_get(const kv_store_t* map, const char* key, int64_t* value_len
     else {
         uint8_t command[4096];
         kvs_command_t* kvsc = (kvs_command_t*) command;
-        log_file_get_data(cbo, command, 4096);
+        logfile_get_data(map->logfile, cbo, command, 4096);
 
         uint8_t* value_data = (uint8_t*) malloc(kvsc->value_length);
         memcpy(value_data, kvsc->data, kvsc->value_length);
@@ -325,7 +326,7 @@ void kv_store_display_values(const kv_store_t* map) {
 
                 uint64_t cbo = extract_cbo(page->cbo_and_ivs[slot_idx]);
 
-                log_file_get_data(cbo, buffer, 4096);
+                logfile_get_data(map->logfile, cbo, buffer, 4096);
 
                 printf("[%lu] (%s) (", counter, (char*) (&cmd_buffer->data[cmd_buffer->value_length]));
 

@@ -23,3 +23,12 @@ uint8_t* jump_to_alignment(uint8_t* ptr, uint64_t alignment) {
     uint64_t aligned_addr = (addr + alignment - 1) & ~(alignment - 1);
     return (uint8_t*)aligned_addr;
 }
+
+/// @brief Sleeps for the specified number of miliseconds
+/// @param miliseconds 
+void sleep_milisec(uint64_t miliseconds) {
+    struct timespec ts;
+    ts.tv_sec = 0;
+    ts.tv_nsec = miliseconds * 1000000L;
+    nanosleep(&ts, NULL);
+}
