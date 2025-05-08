@@ -102,16 +102,53 @@ struct CommandBatch {
     uint8_t commands[MAX_COMMAND_BUFFER]; // dynamically filled
 };
  ```
-- To further improve throughput, we will dynamically adjust the Raft election timeout using recent leader stability metrics. If no failures are detected for a period of time, the timeout increases to avoid unnecessary elections. If failure is suspected (e.g., missed heartbeats), the timeout will be shortened to ensure quick leader recovery.
+- To improve fault tolerance and ensure optimal performance across varying network conditions, we implement the Chandra-Toueg approach for adaptive election timeouts. This approach dynamically adjusts timeouts based on measured network round-trip times (RTT), ensuring quick leader elections when needed while preventing unnecessary elections in stable situations.
 
 ```c
-// Adaptive election timeout adjustment (pseudo-code)
-if (leaderStableFor >= STABLE_THRESHOLD) {
-    election_timeout = min(election_timeout * 2, MAX_TIMEOUT);
-} else if (missedHeartbeats >= HEARTBEAT_THRESHOLD) {
-    election_timeout = max(election_timeout / 2, MIN_TIMEOUT);
-}
+// Adaptive timeout based on Chandra-Toueg approach
+struct AdaptiveTimeout {
+    double estimated_rtt;        // Estimated round-trip time using EWMA
+    double rtt_dev;              // RTT deviation for variance calculation
+    uint32_t current_timeout;    // Current election timeout in ms
+    struct timespec last_request; // For RTT measurement
+};
+
+// Timeout calculation based on RTT measurements
+timeout = (estimated_rtt + 4 * rtt_dev) * SAFETY_FACTOR;
 ```
+
+### Adaptive Timeout Integration API
+
+To keep the adaptive election timeout logic modular and easy to integrate with the network layer, we provide a set of helper functions in `raft_core_adaptive.h` and `raft_core_adaptive.c`. These should be called at the following points in the Raft protocol and network code:
+
+| When to Call                                 | Function Name                        | Purpose                                                      |
+|----------------------------------------------|--------------------------------------|--------------------------------------------------------------|
+| Before sending an outbound RPC (e.g. AppendEntries, RequestVote) | `raft_adaptive_rpc_start(node)`      | Start RTT measurement for adaptive timeout                   |
+| After receiving a response to an outbound RPC| `raft_adaptive_rpc_end(node)`        | End RTT measurement for adaptive timeout                     |
+| When a heartbeat (AppendEntries) is received | `raft_adaptive_record_heartbeat(node)`| Reset timeout and update stability metrics                   |
+| When a vote is granted (RequestVote)         | `raft_adaptive_record_vote(node)`    | Reset timeout and update stability metrics                   |
+| Periodically (e.g., in a timer thread)       | `raft_adaptive_check_missed_heartbeat(node)` | Check for missed heartbeats and update timeout metrics |
+
+**Example Usage:**
+```c
+// Before sending AppendEntries
+raft_adaptive_rpc_start(node);
+// ... send RPC ...
+// After receiving response
+raft_adaptive_rpc_end(node);
+
+// When receiving AppendEntries (heartbeat)
+raft_adaptive_record_heartbeat(node);
+
+// When granting a vote
+raft_adaptive_record_vote(node);
+
+// In a periodic timer thread
+raft_adaptive_check_missed_heartbeat(node);
+```
+
+These functions are thread-safe and encapsulate all adaptive timeout logic, making it easy for the network layer to interact with the election timeout system without knowing its internals.  
+
 - For additional performance, if time permits, we will explore compression of batched AppendEntries requests when bandwidth usage becomes a bottleneck and CPU remains underutilized. Similarly, we may implement command deduplication for SET commands that repeatedly target the same key in a batch.
 - To ensure efficient handling of GET requests, especially under high load, the fixed-length HashMap structure enables quick access to key metadata without scanning the full command log. The Bloom filter provides a fast, probabilistic way to skip disk lookups when a key is definitely not present.
 - Performance and correctness under failure will be tested across a range of hardware setups and workloads, and leader election patterns will be monitored to ensure adaptive timeout logic behaves as expected.

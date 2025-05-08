@@ -10,10 +10,12 @@
 #include "../include/log_file.h"
 #include "../include/xxhash.h"
 #include "command_batcher.h"
+#include "adaptive_timeout.h"
 
 // Constants
-#define ELECTION_TIMEOUT_MIN 250
-#define ELECTION_TIMEOUT_MAX 500
+#define MAX_NODES 5
+#define ELECTION_TIMEOUT_MIN 150
+#define ELECTION_TIMEOUT_MAX 300
 
 // Node states
 typedef enum {
@@ -37,6 +39,13 @@ typedef struct {
     size_t data_len;    // Length of command data
 } raft_entry_t;
 
+// Log structure
+typedef struct {
+    raft_entry_t* entries;  // Array of log entries
+    size_t capacity;        // Total capacity of entries array
+    size_t count;          // Number of entries in log
+} raft_log_t;
+
 // State machine interface
 typedef struct {
     // State machine operations - to be implemented
@@ -57,16 +66,14 @@ typedef struct {
     // Election state
     uint32_t votes_received;
     time_t last_heartbeat;
-    int32_t election_timeout;
     
     // Leader state
-    int32_t leader_id;
+    uint32_t leader_id;
     
     // Log state
+    raft_log_t* log;
     uint64_t commit_index;    // Highest log entry known to be committed
-    uint64_t commit_term;     // Higest term know to be committed
-    uint64_t last_applied_index;    // Highest log entry applied to state machine
-    uint64_t last_applied_term;     // Highest term a log entry was appened in. 
+    uint64_t last_applied;    // Highest log entry applied to state machine
     
     // Leader state (for each server)
     uint64_t next_index[MAX_NODES];    // Index of next log entry to send
@@ -79,6 +86,12 @@ typedef struct {
     
     // Thread safety
     pthread_mutex_t mutex;
+    
+    // Command batching
+    CommandBatcher command_batcher;
+
+    // Adaptive timeout
+    adaptive_timeout_t adaptive_timeout;
 } raft_node_t;
 
 // AppendEntries RPC structures
@@ -86,7 +99,8 @@ typedef struct {
     uint64_t prev_log_index;   // Index of log entry before new ones
     uint64_t prev_log_term;    // Term of prev_log_index entry
     uint64_t leader_commit;    // Leader's commitIndex
-    cmd_buffer_t entries[];      // Log entries to store 
+    size_t n_entries;          // Number of entries
+    kvs_batch_cmd_t entries;   // Log entries to store 
 } raft_append_entries_req_t;
 
 typedef struct {
@@ -105,7 +119,6 @@ typedef struct {
 
 typedef struct {
     bool vote_granted;    // True means candidate received vote
-    uint8_t padding[7];
 } raft_request_vote_resp_t;
 
 // RPC Message Types
@@ -113,8 +126,7 @@ typedef enum {
     RAFT_RPC_APPEND_ENTRIES,
     RAFT_RPC_REQUEST_VOTE,
     RAFT_RPC_RESP_APPEND_ENTRIES,
-    RAFT_RPC_RESP_REQUEST_VOTE,
-    RAFT_HEARTBEAT,
+    RAFT_RPC_RESP_REQUEST_VOTE
 } raft_rpc_type_t;
 
 // Wrapper struct of any message sent between nodes in the RSM
@@ -128,7 +140,7 @@ typedef struct {
 } raft_msg_t;
 
 // Core functions
-raft_node_t raft_init(uint8_t node_id, logfile_t* logfile);
+raft_node_t* raft_init(uint32_t node_id);
 void raft_destroy(raft_node_t* node);
 
 // State transitions
