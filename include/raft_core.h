@@ -10,7 +10,9 @@
 #include "../include/log_file.h"
 #include "../include/xxhash.h"
 #include "command_batcher.h"
-#include "adaptive_timeout.h"
+
+// Forward declaration of AdaptiveTimeout structure
+typedef struct AdaptiveTimeout AdaptiveTimeout;
 
 // Constants
 #define MAX_NODES 5
@@ -91,7 +93,7 @@ typedef struct {
     CommandBatcher command_batcher;
 
     // Adaptive timeout
-    adaptive_timeout_t adaptive_timeout;
+    AdaptiveTimeout* adaptive_timeout;
 } raft_node_t;
 
 // AppendEntries RPC structures

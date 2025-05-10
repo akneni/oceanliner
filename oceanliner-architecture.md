@@ -104,6 +104,29 @@ struct CommandBatch {
  ```
 - To improve fault tolerance and ensure optimal performance across varying network conditions, we implement the Chandra-Toueg approach for adaptive election timeouts. This approach dynamically adjusts timeouts based on measured network round-trip times (RTT), ensuring quick leader elections when needed while preventing unnecessary elections in stable situations.
 
+### Adaptive Timeout System
+
+The Adaptive Timeout System implements the Chandra-Toueg approach for dynamically adjusting timeouts in distributed systems. It is specifically designed for use with the Raft consensus protocol to improve its performance under varying network conditions.
+
+#### Key Features
+- Dynamic timeout adjustment based on network conditions
+- RTT (Round-Trip Time) measurement and tracking
+- Thread-safe operations
+- Configurable parameters for fine-tuning
+- Comprehensive statistics tracking
+
+#### Configuration Parameters
+
+##### Core Parameters
+- `alpha` (default: 0.125): Weight for RTT estimation (EWMA)
+- `beta` (default: 0.25): Weight for RTT deviation calculation
+- `safety_factor` (default: 2.0): Multiplier for timeout calculation
+- `min_timeout` (default: 150ms): Minimum allowed timeout value
+- `max_timeout` (default: 300ms): Maximum allowed timeout value
+- `initial_timeout` (default: 200ms): Starting timeout value
+
+#### Implementation Details
+
 ```c
 // Adaptive timeout based on Chandra-Toueg approach
 struct AdaptiveTimeout {
@@ -117,7 +140,7 @@ struct AdaptiveTimeout {
 timeout = (estimated_rtt + 4 * rtt_dev) * SAFETY_FACTOR;
 ```
 
-### Adaptive Timeout Integration API
+#### Integration API
 
 To keep the adaptive election timeout logic modular and easy to integrate with the network layer, we provide a set of helper functions in `raft_core_adaptive.h` and `raft_core_adaptive.c`. These should be called at the following points in the Raft protocol and network code:
 
@@ -147,7 +170,52 @@ raft_adaptive_record_vote(node);
 raft_adaptive_check_missed_heartbeat(node);
 ```
 
-These functions are thread-safe and encapsulate all adaptive timeout logic, making it easy for the network layer to interact with the election timeout system without knowing its internals.  
+#### Thread Safety and Performance
+
+All operations in the adaptive timeout system are thread-safe through the use of mutex locks. The system can be safely used in multi-threaded environments.
+
+Performance considerations:
+1. **Memory Usage**: The system uses minimal memory, primarily for storing statistics and configuration
+2. **CPU Overhead**: RTT calculations and timeout adjustments are lightweight operations
+3. **Lock Contention**: Mutex locks are held for short durations to minimize contention
+
+#### Best Practices
+
+1. **Configuration**: Adjust parameters based on your network characteristics
+   - Higher `alpha` values make the system more responsive to RTT changes
+   - Higher `beta` values make the system more conservative with timeout adjustments
+   - Adjust `safety_factor` based on your network's stability
+
+2. **RPC Timing**: Always pair `rpc_start` and `rpc_end` calls
+   - Call `rpc_start` immediately before sending the RPC
+   - Call `rpc_end` as soon as the response is received
+
+3. **Heartbeat Handling**: 
+   - Call `record_heartbeat` when receiving a valid heartbeat
+   - Call `check_missed_heartbeat` when a heartbeat is expected but not received
+
+4. **Resource Management**:
+   - Always call `destroy` when the timeout system is no longer needed
+   - Initialize the system before starting any RPC operations
+
+#### Troubleshooting
+
+Common issues and solutions:
+
+1. **High Timeout Values**:
+   - Check for missed heartbeats
+   - Verify RTT measurements are accurate
+   - Consider adjusting `safety_factor` or `beta`
+
+2. **Low Timeout Values**:
+   - Verify heartbeat frequency
+   - Check for network congestion
+   - Consider increasing `min_timeout`
+
+3. **Unstable Timeouts**:
+   - Adjust `alpha` to make the system less responsive
+   - Increase `safety_factor` for more stability
+   - Check for network issues
 
 - For additional performance, if time permits, we will explore compression of batched AppendEntries requests when bandwidth usage becomes a bottleneck and CPU remains underutilized. Similarly, we may implement command deduplication for SET commands that repeatedly target the same key in a batch.
 - To ensure efficient handling of GET requests, especially under high load, the fixed-length HashMap structure enables quick access to key metadata without scanning the full command log. The Bloom filter provides a fast, probabilistic way to skip disk lookups when a key is definitely not present.

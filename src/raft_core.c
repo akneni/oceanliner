@@ -5,7 +5,7 @@
 #include "../include/raft_core.h"
 #include "../include/kv_state_machine.h"
 #include "../include/command_batcher.h"
-#include "../include/adaptive_timeout.h"
+#include "../include/raft_core_adaptive.h"
 
 #define MILLISECONDS_PER_SECOND 1000
 #define INITIAL_LOG_CAPACITY 1024
@@ -73,10 +73,17 @@ raft_node_t* raft_init(uint32_t node_id) {
         node->match_index[i] = 0;
     }
     
-    adaptive_timeout_init(&node->adaptive_timeout);
+    // Initialize adaptive timeout
+    if (raft_adaptive_init(node) != 0) {
+        log_destroy(node->log);
+        free(node);
+        return NULL;
+    }
+    
     node->last_heartbeat = time(NULL);
     
     if (pthread_mutex_init(&node->mutex, NULL) != 0) {
+        raft_adaptive_destroy(node);
         log_destroy(node->log);
         free(node);
         return NULL;
@@ -107,6 +114,9 @@ void raft_destroy(raft_node_t* node) {
     command_batcher_stop(&node->command_batcher);
     command_batcher_destroy(&node->command_batcher);
     
+    // Clean up adaptive timeout
+    raft_adaptive_destroy(node);
+    
     log_destroy(node->log);
     pthread_mutex_destroy(&node->mutex);
     free(node);
@@ -128,8 +138,8 @@ void raft_become_follower(raft_node_t* node, uint64_t term) {
     node->votes_received = 0;
     node->leader_id = 0;
     
-    // Use adaptive timeout instead of static timeout
-    adaptive_timeout_set_active(&node->adaptive_timeout, true);
+    // Record heartbeat for adaptive timeout
+    raft_adaptive_record_heartbeat(node);
     node->last_heartbeat = time(NULL);
     
     pthread_mutex_unlock(&node->mutex);
@@ -145,8 +155,8 @@ void raft_become_candidate(raft_node_t* node) {
     node->votes_received = 1;
     node->leader_id = 0;
     
-    // Reset adaptive timeout
-    adaptive_timeout_reset(&node->adaptive_timeout);
+    // Record vote for adaptive timeout
+    raft_adaptive_record_vote(node);
     node->last_heartbeat = time(NULL);
     
     pthread_mutex_unlock(&node->mutex);
@@ -164,9 +174,6 @@ void raft_become_leader(raft_node_t* node) {
         node->match_index[i] = 0;
     }
     
-    // As leader, we don't need election timeouts
-    adaptive_timeout_set_active(&node->adaptive_timeout, false);
-    
     // Start the command batcher when becoming leader
     command_batcher_start(&node->command_batcher);
     
@@ -176,11 +183,21 @@ void raft_become_leader(raft_node_t* node) {
 bool raft_check_election_timeout(raft_node_t* node) {
     if (!node) return false;
     
-    // Use the adaptive timeout logic to check
     pthread_mutex_lock(&node->mutex);
-    bool timeout = adaptive_timeout_check_elapsed(&node->adaptive_timeout);
-    pthread_mutex_unlock(&node->mutex);
+    bool timeout = false;
     
+    if (node->state != RAFT_STATE_LEADER) {
+        time_t now = time(NULL);
+        time_t elapsed = now - node->last_heartbeat;
+        uint32_t current_timeout = raft_adaptive_get_timeout(node);
+        
+        if (elapsed >= current_timeout / MILLISECONDS_PER_SECOND) {
+            timeout = true;
+            raft_adaptive_check_missed_heartbeat(node);
+        }
+    }
+    
+    pthread_mutex_unlock(&node->mutex);
     return timeout;
 }
 
@@ -188,9 +205,9 @@ void raft_reset_election_timer(raft_node_t* node) {
     if (!node) return;
     
     // Record a heartbeat in the adaptive timeout system
-    adaptive_timeout_record_heartbeat(&node->adaptive_timeout);
+    raft_adaptive_record_heartbeat(node);
     
-    // Update last heartbeat time as well for backward compatibility
+    // Update last heartbeat time
     node->last_heartbeat = time(NULL);
 }
 
@@ -398,7 +415,10 @@ int raft_send_append_entries(raft_node_t* node,
                            uint32_t target_id,
                            raft_entry_t* entries,
                            size_t entries_len) {
-    if (!node || node->state != RAFT_STATE_LEADER) return -1;
+    if (!node || !entries) return -1;
+    
+    // Start RTT measurement
+    raft_adaptive_rpc_start(node);
     
     pthread_mutex_lock(&node->mutex);
     
@@ -438,13 +458,20 @@ int raft_send_append_entries(raft_node_t* node,
     node->next_index[target_id] += entries_len;
     
     pthread_mutex_unlock(&node->mutex);
+    
+    // End RTT measurement
+    raft_adaptive_rpc_end(node);
+    
     return 0;
 }
 
 // Send RequestVote RPC
 int raft_send_request_vote(raft_node_t* node,
                           uint32_t target_id) {
-    if (!node || node->state != RAFT_STATE_CANDIDATE) return -1;
+    if (!node) return -1;
+    
+    // Start RTT measurement
+    raft_adaptive_rpc_start(node);
     
     pthread_mutex_lock(&node->mutex);
     
@@ -463,6 +490,10 @@ int raft_send_request_vote(raft_node_t* node,
     // Note: Actual network send would happen here
     
     pthread_mutex_unlock(&node->mutex);
+    
+    // End RTT measurement
+    raft_adaptive_rpc_end(node);
+    
     return 0;
 }
 
@@ -777,13 +808,13 @@ void raft_check_heartbeat_status(raft_node_t* node) {
     if (!node || node->state != RAFT_STATE_FOLLOWER) return;
     
     // Calculate expected heartbeat interval (usually election_timeout/2)
-    uint32_t expected_interval = adaptive_timeout_get_current(&node->adaptive_timeout) / 2;
+    uint32_t expected_interval = raft_adaptive_get_timeout(node) / 2;
     time_t expected_seconds = (expected_interval / 1000) + 1;
     
     time_t now = time(NULL);
     if ((now - node->last_heartbeat) > expected_seconds) {
         // We've missed an expected heartbeat
-        adaptive_timeout_record_missed(&node->adaptive_timeout);
+        raft_adaptive_check_missed_heartbeat(node);
         
         #ifdef DEBUG
         printf("Missed heartbeat detected. Time since last: %ld sec\n", 
