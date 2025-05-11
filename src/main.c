@@ -337,6 +337,17 @@ void init_cluster(cluster_t* cluster) {
     printf("Cluster initialization complete. Connected to %d nodes.\n", cluster->num_nodes - 1);
 }
 
+void set_cluster_comms_nonblocking(cluster_t* cluster) {
+    for(int i = 0; i < cluster->num_nodes; i++) {
+        if (i == cluster->self_id) continue;
+        int32_t flags = fcntl(cluster->node_fds[i], F_GETFL, 0);
+        assert(flags != -1);
+
+        int32_t res = fcntl(cluster->node_fds[i], F_SETFL, flags | O_NONBLOCK);
+        assert(res != -1);
+    }
+}
+
 void init_logfile(char* logfile_name) {
 	int32_t permissions = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
 
@@ -346,8 +357,6 @@ void init_logfile(char* logfile_name) {
 		exit(1);
 	}
 }
-
-
 
 void* thread_1(void* _) {
     assert(NUM_CLIENT_LISTENERS == 1);
@@ -459,14 +468,14 @@ void* thread_2(void* _) {
     raft_msg_t* msg_buffer = (raft_msg_t*) malloc(buf_size);
 
     while (true) {
+        bool received_msg = false;
         for (uint64_t i = 0; i < cluster_state.num_nodes; i++) {
             if (i == cluster_state.self_id) continue;
 
             assert(cluster_state.node_fds[i] > 0);
 
-            ssize_t bytes_read = recv(cluster_state.node_fds[i], (void*) msg_buffer, sizeof(raft_msg_t), O_NONBLOCK);
+            ssize_t bytes_read = recv(cluster_state.node_fds[i], (void*) msg_buffer, sizeof(raft_msg_t), 0);
             if (bytes_read <= 0) {
-                printf("[DEBUG - thread_1] railed to receive bytes bytes_read=%ld\n", bytes_read);
                 continue;
             }
 
@@ -474,16 +483,23 @@ void* thread_2(void* _) {
                 bytes_read = recv(cluster_state.node_fds[i], (void*) msg_buffer->data, msg_buffer->body_length, 0);
                 assert(bytes_read >= 0);
             }
+            received_msg = true;
             break;
+        }
+
+        if (!received_msg) {
+            continue;
         }
 
         // Handle term
         pthread_mutex_lock(&raft_state.mutex);
         if (msg_buffer->term > raft_state.current_term) {
+            printf("[DEBUG - thread_2] received a message from node[id=%lu] with greater term (updating self term)\n", msg_buffer->sender_node_id);
             raft_state.current_term = msg_buffer->term;
             raft_state.state = RAFT_STATE_FOLLOWER;
         }
         else if (msg_buffer->term < raft_state.current_term) {
+            printf("[DEBUG - thread_2] received a message from node[id=%lu] with outdated term\n", msg_buffer->sender_node_id);
             pthread_mutex_unlock(&raft_state.mutex);
             continue;
         }
@@ -509,17 +525,13 @@ void* thread_2(void* _) {
                 .body_length = sizeof(raft_append_entries_resp_t),
             };
 
-
             bool last_logs_match = (
                 ae_req->prev_log_term == raft_state.last_applied_term && 
                 ae_req->prev_log_index == raft_state.last_applied_index
             );
             bool is_first_log = (raft_state.last_applied_term == 0) && (raft_state.last_applied_index == 0);
 
-            assert(is_first_log);
-
             if (last_logs_match || is_first_log) {
-                printf("[DEBUG - thread_2] received valid appendEntries() RPC\n");
                 *((raft_append_entries_resp_t*) ae_resp->data) = (raft_append_entries_resp_t) {
                     .success = true,
                     .term = ae_req->prev_log_term,
@@ -531,7 +543,6 @@ void* thread_2(void* _) {
                 // Our node is behind, so we cannot commit this. 
                 printf("[DEBUG - thread_2] received invalid appendEntries() RPC (meaning that this follower is behind)\n");
 
-
                 *((raft_append_entries_resp_t*) ae_resp->data) = (raft_append_entries_resp_t) {
                     .success = false,
                     .log_idx = raft_state.last_applied_index,
@@ -541,9 +552,6 @@ void* thread_2(void* _) {
 
             pthread_mutex_unlock(&raft_state.mutex);
 
-            // TEMP 
-            assert(msg_buffer->sender_node_id == 0);
-
             ssize_t bytes_sent = send(
                 cluster_state.node_fds[msg_buffer->sender_node_id],
                 buffer,
@@ -551,7 +559,14 @@ void* thread_2(void* _) {
                 0
             );
 
+            if (bytes_sent < 0) {
+                perror("failed to sent appendEntries() response");
+                exit(1);
+            }
             assert(bytes_sent >= 0);
+
+
+            printf("[DEBUG - thread_2] Responded to appendEntries (send_to=node[%lu] success=%hu)\n", msg_buffer->sender_node_id, ae_successful);
 
             if (!ae_successful) {
                 continue;
@@ -619,6 +634,10 @@ void* thread_2(void* _) {
             };
 
             if (ae_resp->success) {
+                printf(
+                    "[DEBUG - thread_2] received an OK response from an appendEntries() RPC from node[id=%lu]\n", 
+                    msg_buffer->sender_node_id
+                );
                 spsc_queue_enqueue(&_2_to_3, &block);
             }
             else {
@@ -657,8 +676,6 @@ void* thread_2(void* _) {
             }
             continue;
         }
-
-
         
     }
 }
@@ -786,21 +803,43 @@ void* thread_4(void* _) {
             size_t length = kvs_command_len(cmd);
             alignas(8) uint8_t value[1 << 12];
 
+            assert(total_length_processed % 8 == 0);
             assert(cmd->value_length + sizeof(client_resp_t) <= (1 << 12));
 
             client_resp_t* cr = (client_resp_t*) value;
             
-            *cr = (client_resp_t) {
-                .body_length = cmd->value_length,
-                .status_code = 200,
-            };
 
-            uint8_t* value_ptr;
-            kvs_command_get_value(cmd, &value_ptr);
-            memcpy(cr->data, value_ptr, cr->body_length);
+            char* key = kvs_command_get_key(cmd);
+            
+            int64_t value_length = INT64_MAX;
+            uint8_t* data = kv_store_get(&disk_map, key, &value_length);
+
+
+            if (data == NULL) {
+                *cr = (client_resp_t) {
+                    .body_length = 0,
+                    .status_code = 200,
+                };
+                value_length = 0;
+            }
+            else {
+                assert(value_length < MAX_VAL_LEN || value_length > 0);
+                *cr = (client_resp_t) {
+                    .body_length = value_length,
+                    .status_code = 200,
+                };
+                memcpy(cr->data, data, value_length);
+            }
+
+            free(data);
             
             // Send Message
             resp_to_client(clients.clinet_socket_send, &cmd->return_addr, cr);
+
+            char ip[128];
+            inet_ntop(AF_INET, &cmd->return_addr.sin_addr, ip, 128);
+            printf("[DEBUG - thread_4] responded to client %s:%hu\n", ip, ntohs(cmd->return_addr.sin_port));
+
 
             cmd = (kvs_command_t*) &((uint8_t*) cmd)[length];
             total_length_processed += length;
@@ -861,7 +900,12 @@ void* thread_5(void* _) {
                 .body_length=0,
                 .status_code=200,
             };
+
+            char ip[128];
+            inet_ntop(AF_INET, &cmd->return_addr.sin_addr, ip, 128);
+
             resp_to_client(clients.clinet_socket_send, &cmd->return_addr, cresp);
+            printf("[DEBUG - thread_5] responded to client %s:%hu\n", ip, ntohs(cmd->return_addr.sin_port));
 
             cmd = (kvs_command_t*) &((uint8_t*) cmd)[length];
             total_length_processed += length;
@@ -885,23 +929,23 @@ void* thread_7(void* _) {
     while (true) {
         sleep_milisec(75);
 
-        pthread_mutex_lock(&raft_state.mutex);
-        raft_node_t rf_srate = raft_state;
-        pthread_mutex_unlock(&raft_state.mutex);
+        // pthread_mutex_lock(&raft_state.mutex);
+        // raft_node_t rf_srate = raft_state;
+        // pthread_mutex_unlock(&raft_state.mutex);
 
-        if (rf_srate.state == RAFT_STATE_LEADER) {
-            raft_msg_t msg = {
-                .sender_node_id = cluster_state.self_id,
-                .body_length = 0,
-                .rpc_type = RAFT_HEARTBEAT,
-                .term = rf_srate.current_term,
-            };
+        // if (rf_srate.state == RAFT_STATE_LEADER) {
+        //     raft_msg_t msg = {
+        //         .sender_node_id = cluster_state.self_id,
+        //         .body_length = 0,
+        //         .rpc_type = RAFT_HEARTBEAT,
+        //         .term = rf_srate.current_term,
+        //     };
 
-            for(int i = 0; i < cluster_state.num_nodes; i++) {
-                if (i == cluster_state.self_id) continue;
-                send(cluster_state.node_fds[i], &msg, sizeof(msg), 0);
-            }
-        }
+        //     for(int i = 0; i < cluster_state.num_nodes; i++) {
+        //         if (i == cluster_state.self_id) continue;
+        //         send(cluster_state.node_fds[i], &msg, sizeof(msg), 0);
+        //     }
+        // }
     }
 }
 
@@ -932,6 +976,7 @@ int main(int argc, char** argv) {
 
     init_client_listeners(&clients, slef_id);
 	init_cluster(&cluster_state);
+    set_cluster_comms_nonblocking(&cluster_state);
 
     raft_state = raft_init(cluster_state.self_id, &logfile);
 

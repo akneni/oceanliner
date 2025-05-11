@@ -18,6 +18,7 @@ void resp_to_client(int32_t fd, struct sockaddr_in* addr, client_resp_t* msg) {
     assert(msg->status_code == 200 || msg->status_code == 500);
 
     size_t msg_len = sizeof(client_resp_t) + msg->body_length;
-    
-    sendto(fd, msg, msg_len, 0, (struct sockaddr*) addr, sizeof(struct sockaddr));
+    int32_t res = sendto(fd, msg, msg_len, 0, (struct sockaddr*) addr, sizeof(struct sockaddr));
+
+    assert(res > 0);
 }

@@ -10,6 +10,8 @@
     #include <immintrin.h>
 #endif
 
+#include "rocksdb/c.h"
+
 #include "../include/globals.h"
 #include "../include/kv_store.h"
 #include "../include/log_file.h"
@@ -76,7 +78,6 @@ static bool __kv_store_find_entry(
     hash_to_slot(key_hash, &page_idx, &slot_idx, map->num_slots_log2);
     *page_idx_output = page_idx;
 
-
     kvs_page_t* page_ptr = &map->data[page_idx];
     pthread_mutex_lock(&page_ptr->latch);
 
@@ -84,7 +85,7 @@ static bool __kv_store_find_entry(
         uint64_t curr_slot_idx = (slot_idx+i) & 0b0111111;
         assert(curr_slot_idx < KVE_NUM_SLOTS);
 
-        if (key_hash_cmp(key_hash, &page_ptr->key_hash[curr_slot_idx]) || page_ptr->cbo_and_ivs[curr_slot_idx] != UINT64_MAX) {
+        if (key_hash_cmp(key_hash, &page_ptr->key_hash[curr_slot_idx]) && page_ptr->cbo_and_ivs[curr_slot_idx] != UINT64_MAX) {
             *slot_idx_output = curr_slot_idx;
             return true;
         }
@@ -117,7 +118,7 @@ static bool __kv_store_find_empty_slot(
     pthread_mutex_lock(&page_ptr->latch);
 
     for (int i = 0; i < KEY_NUM_SLOTS; i++) {
-        uint64_t curr_slot_idx = (slot_idx+i) & 0b0111111;
+        uint64_t curr_slot_idx = (slot_idx+i) & 0b0111111; // equivilent to (slot_idx+i) % 128
         assert(curr_slot_idx < KVE_NUM_SLOTS);
 
         if (page_ptr->cbo_and_ivs[i] == UINT64_MAX) {
@@ -168,6 +169,13 @@ kv_store_t kv_store_init(const char* filepath, logfile_t* log_file) {
         }
 
         memset(page->inline_vals_len, UINT8_MAX, IVS_NUM_SLOTS);
+
+        #ifndef NDEBUG
+            // This is not necessary, and only exists to suppress valgrind warnings
+            for (int j = 0; j < KVE_NUM_SLOTS; j++) {
+                page->key_hash[j] = (XXH128_hash_t){.high64 = 0, .low64 = 0};
+            }
+        #endif
     }
 
     // Initialize all page-level latches
@@ -195,6 +203,10 @@ uint8_t* kv_store_get(const kv_store_t* map, const char* key, int64_t* value_len
     bool slot_found = __kv_store_find_entry(map, &key_hash, &page_idx, &slot_idx);
     if (!slot_found) {
         // Mutex is already unlocked if no slot is found
+
+        // TEMP
+        printf("no slot found\n");
+
         *value_length = -1;
         return NULL;
     }
@@ -235,7 +247,7 @@ uint8_t* kv_store_get(const kv_store_t* map, const char* key, int64_t* value_len
 /// @param key
 /// @param value
 /// @param value_len
-/// @return
+/// @return -1 on error, 0 on successful set, 1 on successful set and ussage of an inline value slot. 
 int64_t kv_store_set(kv_store_t* map, uint64_t cmd_byte_offset, const char* key, uint8_t* value, size_t value_len) {
     assert(strlen(key) <= MAX_KEY_LEN);
     assert(cmd_byte_offset < (UINT64_MAX >> sizeof(uint8_t)));
@@ -259,6 +271,8 @@ int64_t kv_store_set(kv_store_t* map, uint64_t cmd_byte_offset, const char* key,
     uint64_t ivs = UINT8_MAX;
     uint64_t cbo = cmd_byte_offset;
 
+    int64_t res = 0;
+
     // Inline the value if it fits
     if (value_len <= IKVS_SIZE) {
         assert(IKVS_SIZE < UINT8_MAX);
@@ -266,6 +280,7 @@ int64_t kv_store_set(kv_store_t* map, uint64_t cmd_byte_offset, const char* key,
         int64_t free_ivs = find_free_value_slot(page->inline_vals_len);
 
         if (free_ivs >= 0) {
+            res++;
             ivs = (uint64_t) free_ivs;
 
             memcpy(&page->inline_vals[ivs].data, value, value_len);
@@ -279,7 +294,7 @@ int64_t kv_store_set(kv_store_t* map, uint64_t cmd_byte_offset, const char* key,
     assert(page->cbo_and_ivs[slot_idx] != UINT64_MAX);
 
     pthread_mutex_unlock(&page->latch);
-    return 0;
+    return res;
 }
 
 /// @brief

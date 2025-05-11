@@ -23,6 +23,9 @@ for i in range(5):
 
     c = f"build/debug/oceanliner {i} logfile-{i}.bin".split()
 
+    if (i == 0 and '--valgrind-first' in sys.argv) or '--valgrind-all' in sys.argv:
+        c = ['valgrind', '--leak-check=full'] + c
+
     if i == 0:
         cmd = subprocess.Popen(c)
     else:
