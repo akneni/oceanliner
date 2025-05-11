@@ -28,7 +28,7 @@ typedef struct {
     kvs_command_t data[];
 } kvs_batch_cmd_t;
 
-uint64_t kvs_command_len(const kvs_command_t* log_entry);
+size_t kvs_command_len(const kvs_command_t* log_entry);
 char* kvs_command_get_key(const kvs_command_t* log_entry);
 void kvs_command_get_value(kvs_command_t* log_entry, uint8_t** value);
 

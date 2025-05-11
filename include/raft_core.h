@@ -92,9 +92,10 @@ typedef struct {
 typedef struct {
     bool success;        // True if follower matched prev_log_index and prev_log_term
 
-    // These fields are only relevent if `success` is false
-    uint64_t lc_log_idx; // last committed log index
-    uint64_t lc_term;    // last committed term
+    // if success = true, then these will be the term and index of the log entry just applied. 
+    // if success = false, then these will be the term and index of the last log entry they committed. 
+    uint64_t log_idx;
+    uint64_t term;
 } raft_append_entries_resp_t;
 
 // RequestVote RPC structures

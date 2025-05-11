@@ -11,27 +11,29 @@
 #include "../include/globals.h"
 #include "../include/xxhash.h"
 
-uint64_t kvs_command_len(const kvs_command_t* log_entry) {
+size_t kvs_command_len(const kvs_command_t* log_entry) {
     assert(((uint64_t) log_entry) % 8 == 0);
 
-    return (
-        4 + // kvs_op_t type + padding
-        4 + // uint32_t key_length
-        4 + // uint32_t value_size
-        (uint64_t) log_entry->key_length +
+    size_t length = (
+        sizeof(kvs_command_t) +
+        (size_t) log_entry->key_length +
         1 + // null terminator 
-        (uint64_t) log_entry->value_length
+        (size_t) log_entry->value_length
     );
+
+    return jump_to_alignment(length, 8);
 }
 
 char* kvs_command_get_key(const kvs_command_t* log_entry) {
     assert(((uint64_t) log_entry) % 8 == 0);
-    return (char*) log_entry->data;
+    uint8_t const* key_ptr = &log_entry->data[log_entry->value_length];
+    key_ptr = (uint8_t*) jump_to_alignment((size_t) key_ptr, 4);
+    return (char*) key_ptr;
 }
 
 void kvs_command_get_value(kvs_command_t* log_entry, uint8_t** value) {
     assert(((uint64_t) log_entry) % 8 == 0);
-    *value = (log_entry->data + log_entry->key_length + 1);
+    *value = log_entry->data;
 }
 
 void kvsb_header_calc_checksum(kvsb_header_t* header) {
@@ -63,10 +65,13 @@ void logfile_get_data(logfile_t* logfile, uint64_t cmd_offset, uint8_t* out_buff
 }
 
 void logfile_append_data(logfile_t* logfile, cmd_buffer_t* cmd_buffer) {
-    kvsb_header_t header;
-    header.term = cmd_buffer->term;
-    header.log_index = cmd_buffer->log_index;
-    header.data_length = cmd_buffer->cmds_length;
+    kvsb_header_t header = {
+        .term = cmd_buffer->term,
+        .log_index = cmd_buffer->log_index,
+        .data_length = cmd_buffer->cmds_length,
+        .num_commands = 0,
+    };
+
     kvsb_header_calc_checksum(&header);
 
     lseek(logfile->file_fd, 0, SEEK_END);

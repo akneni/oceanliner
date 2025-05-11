@@ -38,10 +38,11 @@ static XXH128_hash_t hash(const char* key) {
 /// @param slot_idx
 /// @param num_slots Expected to be passed as a power of 2. So passing `10` for this argument would mean that there are 1024 slots.
 static inline void hash_to_slot(const XXH128_hash_t* h, uint64_t* page_idx, uint64_t* slot_idx, uint64_t num_slots_log2) {
-    *page_idx = h->high64 >> (sizeof(*h) - num_slots_log2);
-    *slot_idx = h->high64 >> (sizeof(*h) - KVE_NUM_SLOTS_LOG2);
+    *page_idx = h->high64 >> ((sizeof(uint64_t) * 8) - (num_slots_log2-KVE_NUM_SLOTS_LOG2));
+    *slot_idx = h->high64 >> ((sizeof(uint64_t) * 8) - KVE_NUM_SLOTS_LOG2);
 
     assert(*slot_idx < 128);
+    assert( *page_idx < (1 << (num_slots_log2-KVE_NUM_SLOTS_LOG2)) );
 }
 
 static inline bool key_hash_cmp(const XXH128_hash_t* h1, const XXH128_hash_t* h2) {
@@ -163,8 +164,10 @@ kv_store_t kv_store_init(const char* filepath, logfile_t* log_file) {
     for(int i = 0; i < num_pages-1; i++) {
         kvs_page_t* page = &map.data[i];
         for (int j = 0; j < KVE_NUM_SLOTS; j++) {
-            page->cbo_and_ivs[j] = UINT64_MAX;
+            page->cbo_and_ivs[j] = UINT64_MAX;            
         }
+
+        memset(page->inline_vals_len, UINT8_MAX, IVS_NUM_SLOTS);
     }
 
     // Initialize all page-level latches
