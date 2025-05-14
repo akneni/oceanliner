@@ -9,6 +9,7 @@
 
 #include "../include/globals.h"
 #include "../include/kv_store.h"
+#include "../include/xxhash.h"
 
 // Magic number we replace the headers of the hash field with before hashing
 #define MAGIC_NUMBER (XXH128_hash_t){.high64 = 15269755912704193040ULL, .low64 = 9723239452457707023ULL}
@@ -28,7 +29,7 @@ typedef struct {
     kvs_command_t data[];
 } kvs_batch_cmd_t;
 
-uint64_t kvs_command_len(const kvs_command_t* log_entry);
+size_t kvs_command_len(const kvs_command_t* log_entry);
 char* kvs_command_get_key(const kvs_command_t* log_entry);
 void kvs_command_get_value(kvs_command_t* log_entry, uint8_t** value);
 

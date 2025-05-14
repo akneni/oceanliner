@@ -17,7 +17,7 @@
 #define MAX_NODES 256
 
 // Size of the command buffer
-#define CMDBUF_SIZE (1 << 24)
+#define CMDBUF_SIZE (1 << 26)
 
 // Key-value store operation
 typedef enum kvs_op_t {
@@ -35,15 +35,15 @@ typedef struct {
 } cluster_t;
 
 
-// Key-value store Command Encoding (28 bytes without data[])
+// Key-value store Command Encoding (28 bytes without data[]). This entire thing should be 4-byte aligned. 
 typedef struct kvs_command_t {
     uint32_t key_length;
     uint32_t value_length;
     struct sockaddr_in return_addr;
     kvs_op_t type;
-    uint8_t padding[3];
 
     // First stores the binary data (value), then stores the key (null terminated)
+    // the key will be padded to 4 bytes
     uint8_t data[];
 } kvs_command_t;
 
@@ -51,6 +51,7 @@ typedef struct {
     uint64_t term;
     uint64_t log_index;
     size_t cmds_length;
+    uint64_t num_cmds;
     uint8_t* data_to_free;
     kvs_command_t data[];
 } cmd_buffer_t;
@@ -66,8 +67,8 @@ typedef struct {
 } _1_to_3_t;
 
 typedef struct {
-    uint64_t lc_term;
-    uint64_t lc_log_index;
+    uint64_t term;
+    uint64_t log_index;
     uint64_t node_id;
 } _2_to_3_t;
 
@@ -75,7 +76,7 @@ typedef struct {
 
 
 uint64_t fsizeof(FILE* f);
-uint8_t* jump_to_alignment(uint8_t* ptr, uint64_t alignment);
+size_t jump_to_alignment(size_t ptr, size_t alignment);
 void sleep_milisec(uint64_t miliseconds);
 
 extern int32_t logfile_fd_mut;

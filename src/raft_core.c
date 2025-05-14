@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <assert.h>
 
 #include "../include/raft_core.h"
 #include "../include/kv_state_machine.h"

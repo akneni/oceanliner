@@ -107,10 +107,12 @@ typedef struct {
 
 typedef struct {
     bool success;        // True if follower matched prev_log_index and prev_log_term
+    uint8_t padding[7];
 
-    // These fields are only relevent if `success` is false
-    uint64_t lc_log_idx; // last committed log index
-    uint64_t lc_term;    // last committed term
+    // if success = true, then these will be the term and index of the log entry just applied. 
+    // if success = false, then these will be the term and index of the last log entry they committed. 
+    uint64_t log_idx;
+    uint64_t term;
 } raft_append_entries_resp_t;
 
 // RequestVote RPC structures
@@ -137,8 +139,8 @@ typedef struct {
     uint64_t term;
     uint64_t sender_node_id;
     raft_rpc_type_t rpc_type;
-    uint8_t padding[7];
-    uint64_t data[];
+    uint8_t padding[8 - sizeof(raft_rpc_type_t)];
+    uint8_t data[];
 } raft_msg_t;
 
 // Core functions

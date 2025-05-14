@@ -18,10 +18,10 @@ uint64_t fsizeof(FILE* f) {
 /// @param ptr Pointer to align
 /// @param alignment Alignment boundary (e.g., 8 for 8-byte alignment)
 /// @return Aligned pointer
-uint8_t* jump_to_alignment(uint8_t* ptr, uint64_t alignment) {
-    uint64_t addr = (uint64_t)ptr;
-    uint64_t aligned_addr = (addr + alignment - 1) & ~(alignment - 1);
-    return (uint8_t*)aligned_addr;
+size_t jump_to_alignment(size_t ptr, size_t alignment) {
+    size_t addr = ptr;
+    size_t aligned_addr = (addr + alignment - 1) & ~(alignment - 1);
+    return aligned_addr;
 }
 
 /// @brief Sleeps for the specified number of miliseconds
