@@ -9,6 +9,7 @@
 
 #include "../include/globals.h"
 #include "../include/kv_store.h"
+#include "../include/xxhash.h"
 
 // Magic number we replace the headers of the hash field with before hashing
 #define MAGIC_NUMBER (XXH128_hash_t){.high64 = 15269755912704193040ULL, .low64 = 9723239452457707023ULL}

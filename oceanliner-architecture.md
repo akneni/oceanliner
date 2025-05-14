@@ -116,3 +116,9 @@ if (leaderStableFor >= STABLE_THRESHOLD) {
 - To ensure efficient handling of GET requests, especially under high load, the fixed-length HashMap structure enables quick access to key metadata without scanning the full command log. The Bloom filter provides a fast, probabilistic way to skip disk lookups when a key is definitely not present.
 - Performance and correctness under failure will be tested across a range of hardware setups and workloads, and leader election patterns will be monitored to ensure adaptive timeout logic behaves as expected.
 
+
+
+## Status Codes
+- 200 => operation successful
+- 201 => get(k) operation succeeded, but no key `k` exists
+- 500 => Operation failed

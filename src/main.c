@@ -413,20 +413,22 @@ void* thread_1(void* _) {
                     continue;
                 }
 
-                printf("[DEGUG - thread_1] Received request from client (bytes read: %ld)\n", bytes_read);
                 assert(bytes_read >= sizeof(kvs_command_t));
+                assert(jump_to_alignment(bytes_read, 8) == kvs_command_len((kvs_command_t*) i_buffer));
 
                 cmd_buffer_t* target_cmdb = (cmd_ibuf->type == CMD_GET) ? cmd_buffer_r : cmd_buffer_w;
-                memcpy(&target_cmdb->data[target_cmdb->cmds_length], i_buffer, bytes_read);
+
+                assert(target_cmdb->cmds_length < CMDBUF_SIZE - 256);
+                memcpy(&((uint8_t*) target_cmdb->data)[target_cmdb->cmds_length], i_buffer, bytes_read);
+                target_cmdb->num_cmds = target_cmdb->num_cmds + 1;
                 target_cmdb->cmds_length += jump_to_alignment(bytes_read, 8);
 
-                if (target_cmdb->cmds_length >= (CMDBUF_SIZE - max_kvs_cmd_size - sizeof(cmd_buffer_t))) {
+                if (target_cmdb->cmds_length >= (CMDBUF_SIZE - max_kvs_cmd_size - sizeof(cmd_buffer_t) - 64)) {
                     break;
                 }
 
                 time_t end_time = clock();
                 time_elapsed += ((double) end_time - (double) start_time) / (double) CLOCKS_PER_SEC;
-                printf("[DEBUG - thread_1] time elapsed: %f\n", time_elapsed);
             }
 
             // If we're at a new term than when we started the batch, abandon it as it won't get accepted anyways
@@ -480,16 +482,25 @@ void* thread_2(void* _) {
             }
 
             if (msg_buffer->body_length > 0) {
-                bytes_read = recv(cluster_state.node_fds[i], (void*) msg_buffer->data, msg_buffer->body_length, 0);
-                assert(bytes_read >= 0);
+                bytes_read = 0;
+                
+                while (bytes_read < msg_buffer->body_length) {
+                    int64_t res = recv(cluster_state.node_fds[i], (void*) &msg_buffer->data[bytes_read], msg_buffer->body_length, 0);
+                    assert(res > 0);
+                    bytes_read += res;
+                }
+                assert(bytes_read == msg_buffer->body_length);
             }
             received_msg = true;
+
             break;
         }
 
         if (!received_msg) {
             continue;
         }
+
+        assert(msg_buffer->sender_node_id < MAX_NODES);
 
         // Handle term
         pthread_mutex_lock(&raft_state.mutex);
@@ -525,14 +536,21 @@ void* thread_2(void* _) {
                 .body_length = sizeof(raft_append_entries_resp_t),
             };
 
+            #ifndef NDEBUG
+                // Not necessary for functionality, only exists to suppress valgrind warnings
+                uint8_t n1[4] = {183};
+                memcpy(ae_resp->padding, &n1, 4);
+            #endif
+
             bool last_logs_match = (
                 ae_req->prev_log_term == raft_state.last_applied_term && 
                 ae_req->prev_log_index == raft_state.last_applied_index
             );
             bool is_first_log = (raft_state.last_applied_term == 0) && (raft_state.last_applied_index == 0);
 
+            raft_append_entries_resp_t* aer_data = ((raft_append_entries_resp_t*) ae_resp->data) ;
             if (last_logs_match || is_first_log) {
-                *((raft_append_entries_resp_t*) ae_resp->data) = (raft_append_entries_resp_t) {
+                *aer_data = (raft_append_entries_resp_t) {
                     .success = true,
                     .term = ae_req->prev_log_term,
                     .log_idx = ae_req->prev_log_index + 1,
@@ -543,12 +561,18 @@ void* thread_2(void* _) {
                 // Our node is behind, so we cannot commit this. 
                 printf("[DEBUG - thread_2] received invalid appendEntries() RPC (meaning that this follower is behind)\n");
 
-                *((raft_append_entries_resp_t*) ae_resp->data) = (raft_append_entries_resp_t) {
+                *aer_data = (raft_append_entries_resp_t) {
                     .success = false,
                     .log_idx = raft_state.last_applied_index,
                     .term = raft_state.last_applied_term,
                 };
             }
+
+            #ifndef NDEBUG
+                // Not necessary for functionality, only exists to suppress valgrind warnings
+                uint8_t n2[7] = {183};
+                memcpy(aer_data->padding, &n2, 7);
+            #endif
 
             pthread_mutex_unlock(&raft_state.mutex);
 
@@ -690,7 +714,12 @@ void* thread_3(void* _) {
             continue;
         }
 
-        printf("[DEBUG - thread_3] received command_buffer from thread 1 (length of cmds: (W %lu) (R %lu))\n", cmd_buffers.write_cmds->cmds_length, cmd_buffers.read_cmds->cmds_length);
+        printf(
+            "[DEBUG - thread_3] received command_buffer from thread 1 (length of cmds: (W %lu) (R %lu)) (RW num_cmds %lu)\n", 
+            cmd_buffers.write_cmds->cmds_length, 
+            cmd_buffers.read_cmds->cmds_length,
+            cmd_buffers.read_cmds->num_cmds + cmd_buffers.write_cmds->num_cmds
+        );
 
         assert(cmd_buffers.read_cmds->term == cmd_buffers.write_cmds->term);
 
@@ -813,20 +842,26 @@ void* thread_4(void* _) {
             
             int64_t value_length = INT64_MAX;
             uint8_t* data = kv_store_get(&disk_map, key, &value_length);
+            assert(value_length < MAX_VAL_LEN);
 
 
             if (data == NULL) {
                 *cr = (client_resp_t) {
                     .body_length = 0,
-                    .status_code = 200,
+                    .status_code = 201,
+                    .op_type = CMD_GET,
                 };
                 value_length = 0;
             }
             else {
+                char string[128] = {0};
+                memcpy(string, data, value_length);
+
                 assert(value_length < MAX_VAL_LEN || value_length > 0);
                 *cr = (client_resp_t) {
                     .body_length = value_length,
                     .status_code = 200,
+                    .op_type = CMD_GET,
                 };
                 memcpy(cr->data, data, value_length);
             }
@@ -838,8 +873,6 @@ void* thread_4(void* _) {
 
             char ip[128];
             inet_ntop(AF_INET, &cmd->return_addr.sin_addr, ip, 128);
-            printf("[DEBUG - thread_4] responded to client %s:%hu\n", ip, ntohs(cmd->return_addr.sin_port));
-
 
             cmd = (kvs_command_t*) &((uint8_t*) cmd)[length];
             total_length_processed += length;
@@ -866,15 +899,17 @@ void* thread_5(void* _) {
         assert(cmd_buffer->cmds_length <= CMDBUF_SIZE);
 
         // Size of the log file before this batch
-        size_t log_size = logfile_sizeof(&logfile) - 2 * sizeof(kvsb_header_t) - cmd_buffer->cmds_length;
-
         kvs_command_t* cmd = cmd_buffer->data;
 
         size_t total_length_processed = 0;
 
+        printf("[DEBUG - thread_5] cmd_buffer->cmds_length = %lu\n", cmd_buffer->cmds_length);
+
         while (total_length_processed < cmd_buffer->cmds_length) {
             assert(cmd->value_length < MAX_VAL_LEN);
             assert(cmd->value_length < CMDBUF_SIZE);
+
+            assert((cmd_buffer->cmds_length - total_length_processed) >= sizeof(kvs_command_t));
 
             size_t length = kvs_command_len(cmd);
             char* key = kvs_command_get_key(cmd);
@@ -883,29 +918,39 @@ void* thread_5(void* _) {
                 kv_store_delete(&disk_map, key);
             }
             else if (cmd->type == CMD_SET) {
-                uint8_t* value;
+                uint8_t* value = NULL;
                 kvs_command_get_value(cmd, &value);
 
-                uint64_t cmd_offset = log_size + sizeof(kvsb_header_t) + total_length_processed;
-                kv_store_set(&disk_map, cmd_offset, key, value, cmd->value_length);
+                assert(value != NULL);
+
+                char string[128] = {0};
+                memcpy(string, value, cmd->value_length);
+                kv_store_set(&disk_map, key, value, cmd->value_length);
             }
             else {
-                printf("FOUND CMD TYPE [%d] in thread 5\n", cmd->type);
+                printf("FOUND CMD TYPE [%d] in thread_5\n", cmd->type);
+                exit(1);
             }
 
-            // Returns success to the client. 
-            alignas(8) uint8_t buffer[128];
-            client_resp_t* cresp = (client_resp_t*) buffer;
-            *cresp = (client_resp_t) {
-                .body_length=0,
-                .status_code=200,
-            };
+            pthread_mutex_lock(&raft_state.mutex);
+            raft_state_t state = raft_state.state;
+            pthread_mutex_unlock(&raft_state.mutex);
 
-            char ip[128];
-            inet_ntop(AF_INET, &cmd->return_addr.sin_addr, ip, 128);
-
-            resp_to_client(clients.clinet_socket_send, &cmd->return_addr, cresp);
-            printf("[DEBUG - thread_5] responded to client %s:%hu\n", ip, ntohs(cmd->return_addr.sin_port));
+            // Returns success to the client. (only do so if leader)
+            if (state == RAFT_STATE_LEADER) {
+                alignas(8) uint8_t buffer[128];
+                client_resp_t* cresp = (client_resp_t*) buffer;
+                *cresp = (client_resp_t) {
+                    .body_length=0,
+                    .status_code=200,
+                    .op_type=cmd->type,
+                };
+    
+                char ip[128];
+                inet_ntop(AF_INET, &cmd->return_addr.sin_addr, ip, 128);
+    
+                resp_to_client(clients.clinet_socket_send, &cmd->return_addr, cresp);
+            }
 
             cmd = (kvs_command_t*) &((uint8_t*) cmd)[length];
             total_length_processed += length;
@@ -951,8 +996,6 @@ void* thread_7(void* _) {
 
 
 int main(int argc, char** argv) {
-	assert(sizeof(kvs_page_t) == 4096);
-
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 
@@ -960,6 +1003,12 @@ int main(int argc, char** argv) {
 		perror("invalid number of arguments");
 		exit(1);
 	}
+
+    #ifndef NDEBUG
+        printf("DEBUG MODE\n");
+    #else
+        printf("RELEASE MODE\n");
+    #endif
 
 	uint64_t slef_id = (uint64_t) strtoll(argv[1], NULL, 10);
 	assert(slef_id < MAX_NODES);

@@ -1,362 +1,220 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
-#include <string.h>
-#include <stdbool.h>
+#include <string.h> // For strlen, memcpy
 #include <assert.h>
-#include <pthread.h>
+#include <unistd.h>
 
-#ifdef __AVX2__
-    #include <immintrin.h>
-#endif
+#include "rocksdb/c.h" // Main RocksDB C API header
 
-#include "rocksdb/c.h"
-
-#include "../include/globals.h"
 #include "../include/kv_store.h"
-#include "../include/log_file.h"
-#include "../include/xxhash.h"
+// #include "../include/globals.h" // Only if MAX_KEY_LEN etc. are needed for assertions
+// #include "../include/log_file.h" // Only if logfile_t is actively used by these functions now
+// #include "../include/xxhash.h" // Not needed anymore
 
-static inline int64_t find_free_value_slot(uint8_t* ivs_len_arr) {
-    for (uint64_t i = 0; i < IVS_NUM_SLOTS; i++) {
-        if (ivs_len_arr[i] == UINT8_MAX) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-static XXH128_hash_t hash(const char* key) {
-    size_t key_length = strlen(key);
-    assert(key_length <= MAX_KEY_LEN);
-
-    XXH128_hash_t h = XXH3_128bits(key, key_length);
-    return h;
-}
-
-/// @brief
-/// @param key
-/// @param page_idx
-/// @param slot_idx
-/// @param num_slots Expected to be passed as a power of 2. So passing `10` for this argument would mean that there are 1024 slots.
-static inline void hash_to_slot(const XXH128_hash_t* h, uint64_t* page_idx, uint64_t* slot_idx, uint64_t num_slots_log2) {
-    *page_idx = h->high64 >> ((sizeof(uint64_t) * 8) - (num_slots_log2-KVE_NUM_SLOTS_LOG2));
-    *slot_idx = h->high64 >> ((sizeof(uint64_t) * 8) - KVE_NUM_SLOTS_LOG2);
-
-    assert(*slot_idx < 128);
-    assert( *page_idx < (1 << (num_slots_log2-KVE_NUM_SLOTS_LOG2)) );
-}
-
-static inline bool key_hash_cmp(const XXH128_hash_t* h1, const XXH128_hash_t* h2) {
-    #ifdef __AVX2__
-        __m128i h1_simd = _mm_load_si128((__m128i*) h1);
-        __m128i h2_simd = _mm_load_si128((__m128i*) h2);
-
-        __m128i cmp = _mm_cmpeq_epi8(h1_simd, h2_simd);
-        __m128i zero = _mm_setzero_si128();
-
-        return _mm_testc_si128(zero, cmp) == 1;
-    #else
-        return XXH128_cmp(h1, h2) == 0;
-    #endif
-}
-
-/// @brief Finds the slot with the specified key and aquires a lock on that page if a free slot is available.
-/// @param map
-/// @param key
-/// @param page_idx_output
-/// @param page_ptr_output
-/// @param slot_ptr_output
-static bool __kv_store_find_entry(
-    const kv_store_t* map,
-    const XXH128_hash_t* key_hash,
-    uint64_t* page_idx_output,
-    uint64_t* slot_idx_output
-) {
-    uint64_t page_idx;
-    uint64_t slot_idx;
-    hash_to_slot(key_hash, &page_idx, &slot_idx, map->num_slots_log2);
-    *page_idx_output = page_idx;
-
-    kvs_page_t* page_ptr = &map->data[page_idx];
-    pthread_mutex_lock(&page_ptr->latch);
-
-    for (uint64_t i = 0; i < KEY_NUM_SLOTS; i++) {
-        uint64_t curr_slot_idx = (slot_idx+i) & 0b0111111;
-        assert(curr_slot_idx < KVE_NUM_SLOTS);
-
-        if (key_hash_cmp(key_hash, &page_ptr->key_hash[curr_slot_idx]) && page_ptr->cbo_and_ivs[curr_slot_idx] != UINT64_MAX) {
-            *slot_idx_output = curr_slot_idx;
-            return true;
-        }
-    }
-
-    pthread_mutex_unlock(&page_ptr->latch);
-    return false;
-}
-
-/// @brief Finds the slot of the matching key or the first empty slot. Aquires a lock on the page if a slot is found
-/// @param map
-/// @param key
-/// @param page_ptr_output
-/// @param slot_ptr_output
-static bool __kv_store_find_empty_slot(
-    const kv_store_t* map,
-    const XXH128_hash_t* key_hash,
-    uint64_t* page_idx_output,
-    uint64_t* slot_idx_output
-) {
-    uint64_t page_idx;
-    uint64_t slot_idx;
-    hash_to_slot(key_hash, &page_idx, &slot_idx, map->num_slots_log2);
-
-    *page_idx_output = page_idx;
-    *slot_idx_output = UINT64_MAX;
-
-    kvs_page_t* page_ptr = &map->data[page_idx];
-
-    pthread_mutex_lock(&page_ptr->latch);
-
-    for (int i = 0; i < KEY_NUM_SLOTS; i++) {
-        uint64_t curr_slot_idx = (slot_idx+i) & 0b0111111; // equivilent to (slot_idx+i) % 128
-        assert(curr_slot_idx < KVE_NUM_SLOTS);
-
-        if (page_ptr->cbo_and_ivs[i] == UINT64_MAX) {
-            if (*slot_idx_output == UINT64_MAX) {
-                *slot_idx_output = curr_slot_idx;
-            }
-            continue;
-        }
-
-        if (key_hash_cmp(key_hash, &page_ptr->key_hash[curr_slot_idx])) {
-            *slot_idx_output = curr_slot_idx;
-            return true;
-        }
-    }
-
-    if (*slot_idx_output == UINT64_MAX) {
-        pthread_mutex_unlock(&page_ptr->latch);
-        return false;
-    }
-    return true;
-}
-
-static inline uint64_t extract_ivs(uint64_t num) {
-    uint64_t ivs = num & 0xFF; // Extract lower 8 bits
-    assert(ivs < IVS_NUM_SLOTS || ivs == UINT8_MAX);
-    return ivs;
-}
-
-static inline uint64_t extract_cbo(uint64_t num) {
-    return num >> 8; // Extract upper 56 bits
-}
-
-kv_store_t kv_store_init(const char* filepath, logfile_t* log_file) {
+kv_store_t kv_store_init(const char* db_path, logfile_t* log_file) {
     kv_store_t map;
+    map.db = NULL;
+    map.options = NULL;
+    map.write_options = NULL;
+    map.read_options = NULL;
+    map.logfile = log_file; // Store if still needed for other app logic
 
-    map.num_slots_log2 = 10;
-    uint64_t num_pages = (1 << (map.num_slots_log2 - KVE_NUM_SLOTS_LOG2)) + 1;
+    map.options = rocksdb_options_create();
+    if (!map.options) {
+        fprintf(stderr, "kv_store_init: failed to create rocksdb_options_t\n");
+        // Potentially return a kv_store_t indicating an error state or handle error differently
+        return map; // Returning a partially uninitialized map is not ideal,
+                    // consider a different error reporting mechanism for init
+    }
+    // Optimize RocksDB. This is the easiest way to get RocksDB to perform well
+    long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    rocksdb_options_increase_parallelism(map.options, (int)(cpus));
+    rocksdb_options_optimize_level_style_compaction(map.options, 0);
+    rocksdb_options_set_create_if_missing(map.options, 1);
 
+    char* err = NULL;
+    map.db = rocksdb_open(map.options, db_path, &err);
 
-    size_t data_size = num_pages * sizeof(kvs_page_t);
-    map.data = (kvs_page_t*) malloc(data_size);
-
-    // Set all slots to be empty
-    for(int i = 0; i < num_pages-1; i++) {
-        kvs_page_t* page = &map.data[i];
-        for (int j = 0; j < KVE_NUM_SLOTS; j++) {
-            page->cbo_and_ivs[j] = UINT64_MAX;            
-        }
-
-        memset(page->inline_vals_len, UINT8_MAX, IVS_NUM_SLOTS);
-
-        #ifndef NDEBUG
-            // This is not necessary, and only exists to suppress valgrind warnings
-            for (int j = 0; j < KVE_NUM_SLOTS; j++) {
-                page->key_hash[j] = (XXH128_hash_t){.high64 = 0, .low64 = 0};
-            }
-        #endif
+    if (err != NULL) {
+        fprintf(stderr, "kv_store_init: rocksdb_open failed: %s\n", err);
+        free(err);
+        rocksdb_options_destroy(map.options);
+        map.options = NULL;
+        map.db = NULL; // Ensure db is NULL on error
+        return map;   // Same as above, error handling for init could be improved
     }
 
-    // Initialize all page-level latches
-    for(int i = 0; i < num_pages-1; i++) {
-        kvs_page_t* page = &map.data[i];
-        pthread_mutex_init(&page->latch, NULL);
+    map.write_options = rocksdb_writeoptions_create();
+    if (!map.write_options) {
+        fprintf(stderr, "kv_store_init: failed to create rocksdb_writeoptions_t\n");
+        rocksdb_close(map.db);
+        rocksdb_options_destroy(map.options);
+        map.db = NULL;
+        map.options = NULL;
+        return map;
     }
 
-    map.logfile = log_file;
+    map.read_options = rocksdb_readoptions_create();
+    if (!map.read_options) {
+        fprintf(stderr, "kv_store_init: failed to create rocksdb_readoptions_t\n");
+        rocksdb_writeoptions_destroy(map.write_options);
+        rocksdb_close(map.db);
+        rocksdb_options_destroy(map.options);
+        map.write_options = NULL;
+        map.db = NULL;
+        map.options = NULL;
+        return map;
+    }
+
+    printf("kv_store_init: RocksDB initialized successfully at %s\n", db_path);
     return map;
 }
 
-/// @brief
-/// @param map
-/// @param key
-/// @param val_output_buffer
-/// @return The length of th evalue when the key exists and -1 if it doesn't exist
+void kv_store_destroy(kv_store_t* map) {
+    if (!map) return;
+
+    if (map->read_options) {
+        rocksdb_readoptions_destroy(map->read_options);
+        map->read_options = NULL;
+    }
+    if (map->write_options) {
+        rocksdb_writeoptions_destroy(map->write_options);
+        map->write_options = NULL;
+    }
+    if (map->db) {
+        rocksdb_close(map->db);
+        map->db = NULL;
+    }
+    if (map->options) { // Options are typically destroyed after the DB is closed
+        rocksdb_options_destroy(map->options);
+        map->options = NULL;
+    }
+    printf("kv_store_destroy: RocksDB resources released.\n");
+}
+
 uint8_t* kv_store_get(const kv_store_t* map, const char* key, int64_t* value_length) {
-    assert(strlen(key) <= MAX_KEY_LEN);
+    assert(map != NULL && map->db != NULL && key != NULL && value_length != NULL);
+    // assert(strlen(key) <= MAX_KEY_LEN); // If you still have MAX_KEY_LEN
 
-    XXH128_hash_t key_hash = hash(key);
-    uint64_t page_idx;
-    uint64_t slot_idx;
+    char* err = NULL;
+    size_t rocks_value_len;
+    char* rocks_value = rocksdb_get(
+        map->db,
+        map->read_options,
+        key, strlen(key),
+        &rocks_value_len,
+        &err
+    );
 
-    bool slot_found = __kv_store_find_entry(map, &key_hash, &page_idx, &slot_idx);
-    if (!slot_found) {
-        // Mutex is already unlocked if no slot is found
-
-        // TEMP
-        printf("no slot found\n");
-
+    if (err != NULL) {
+        fprintf(stderr, "kv_store_get: rocksdb_get failed for key '%s': %s\n", key, err);
+        free(err);
         *value_length = -1;
         return NULL;
     }
 
-    kvs_page_t* page = &map->data[page_idx];
-
-
-    uint64_t cbo = extract_cbo(page->cbo_and_ivs[slot_idx]);
-    uint64_t ivs = extract_ivs(page->cbo_and_ivs[slot_idx]);
-
-    if (ivs != UINT8_MAX) {
-        assert(ivs < IVS_NUM_SLOTS);
-
-        inline_val_slot* value_ptr = &page->inline_vals[ivs];
-
-        uint8_t* value_data = (uint8_t*) malloc(page->inline_vals_len[ivs]);
-        memcpy(value_data, value_ptr->data, (size_t) page->inline_vals_len[ivs]);
-
-        pthread_mutex_unlock(&page->latch);
-        *value_length = (int64_t) page->inline_vals_len[ivs];
-        return value_data;
+    if (rocks_value == NULL) {
+        // Key not found
+        *value_length = -1;
+        return NULL;
     }
-    else {
-        uint8_t command[4096];
-        kvs_command_t* kvsc = (kvs_command_t*) command;
-        logfile_get_data(map->logfile, cbo, command, 4096);
 
-        uint8_t* value_data = (uint8_t*) malloc(kvsc->value_length);
-        memcpy(value_data, kvsc->data, kvsc->value_length);
-
-        pthread_mutex_unlock(&page->latch);
-        return value_data;
-    }
+    // RocksDB returns char*, but our API expects uint8_t*. Direct cast is fine
+    // as long as the data is treated as raw bytes. The caller must free this.
+    *value_length = (int64_t)rocks_value_len;
+    return (uint8_t*)rocks_value;
 }
 
-/// @brief
-/// @param map
-/// @param key
-/// @param value
-/// @param value_len
-/// @return -1 on error, 0 on successful set, 1 on successful set and ussage of an inline value slot. 
-int64_t kv_store_set(kv_store_t* map, uint64_t cmd_byte_offset, const char* key, uint8_t* value, size_t value_len) {
-    assert(strlen(key) <= MAX_KEY_LEN);
-    assert(cmd_byte_offset < (UINT64_MAX >> sizeof(uint8_t)));
-    assert(value_len <= MAX_VAL_LEN);
+// Note: cmd_byte_offset is removed. If it's data, it must be part of 'value'.
+int64_t kv_store_set(kv_store_t* map, const char* key, const uint8_t* value, size_t value_len) {
+    assert(map != NULL && map->db != NULL && key != NULL && value != NULL);
+    // assert(strlen(key) <= MAX_KEY_LEN);
+    // assert(value_len <= MAX_VAL_LEN); // If you still have MAX_VAL_LEN
 
-    XXH128_hash_t key_hash = hash(key);
-    uint64_t page_idx;
-    uint64_t slot_idx;
+    char* err = NULL;
+    rocksdb_put(
+        map->db,
+        map->write_options,
+        key, strlen(key),
+        (const char*)value, value_len, // Cast uint8_t* to const char*
+        &err
+    );
 
-    bool found_slot = __kv_store_find_empty_slot(map, &key_hash, &page_idx, &slot_idx);
-    if (!found_slot) {
-        perror("failed to find slot.\n");
-        exit(1);
-        return -1;
+    if (err != NULL) {
+        fprintf(stderr, "kv_store_set: rocksdb_put failed for key '%s': %s\n", key, err);
+        free(err);
+        return -1; // Error
     }
-
-    kvs_page_t* page = &map->data[page_idx];
-
-    page->key_hash[slot_idx] = key_hash;
-
-    uint64_t ivs = UINT8_MAX;
-    uint64_t cbo = cmd_byte_offset;
-
-    int64_t res = 0;
-
-    // Inline the value if it fits
-    if (value_len <= IKVS_SIZE) {
-        assert(IKVS_SIZE < UINT8_MAX);
-
-        int64_t free_ivs = find_free_value_slot(page->inline_vals_len);
-
-        if (free_ivs >= 0) {
-            res++;
-            ivs = (uint64_t) free_ivs;
-
-            memcpy(&page->inline_vals[ivs].data, value, value_len);
-            page->inline_vals_len[ivs] = (uint8_t) value_len;
-        }
-    }
-
-    assert(ivs < IVS_NUM_SLOTS || ivs == UINT8_MAX);
-
-    page->cbo_and_ivs[slot_idx] = (cbo << 8) | ivs;
-    assert(page->cbo_and_ivs[slot_idx] != UINT64_MAX);
-
-    pthread_mutex_unlock(&page->latch);
-    return res;
+    return 0; // Success
 }
 
-/// @brief
-/// @param map
-/// @param key
-/// @return
 int64_t kv_store_delete(kv_store_t* map, const char* key) {
-    assert(strlen(key) <= MAX_KEY_LEN);
+    assert(map != NULL && map->db != NULL && key != NULL);
+    // assert(strlen(key) <= MAX_KEY_LEN);
 
-    XXH128_hash_t key_hash = hash(key);
-    uint64_t page_idx;
-    uint64_t slot_idx;
+    char* err = NULL;
+    rocksdb_delete(
+        map->db,
+        map->write_options,
+        key, strlen(key),
+        &err
+    );
 
-    bool slot_found = __kv_store_find_entry(map, &key_hash, &page_idx, &slot_idx);
-    if (!slot_found) {
-        // Mutex is already unlocked if no slot is found
-        return 0;
+    if (err != NULL) {
+        fprintf(stderr, "kv_store_delete: rocksdb_delete failed for key '%s': %s\n", key, err);
+        free(err);
+        return -1; // Error
     }
-
-    kvs_page_t* page = &map->data[page_idx];
-
-    uint64_t ivs = extract_ivs(page->cbo_and_ivs[slot_idx]);
-    if (ivs != UINT8_MAX) {
-        page->inline_vals_len[ivs] = UINT8_MAX;
-    }
-
-    page->cbo_and_ivs[slot_idx] = UINT64_MAX;
-    pthread_mutex_unlock(&page->latch);
-    return 0;
+    return 0; // Success
 }
 
-/// @brief This is is to be used for debugging ONLY.
-/// @param map
 void kv_store_display_values(const kv_store_t* map) {
-    assert(map->data != NULL);
+    assert(map != NULL && map->db != NULL);
 
-    uint8_t buffer[4096];
-    kvs_command_t* cmd_buffer = (kvs_command_t*) buffer;
-
-    uint64_t counter = 0;
-    for(uint64_t page_idx = 1; page_idx < (map->num_slots_log2 / 100) + 1; page_idx++) {
-        kvs_page_t* page = &map->data[page_idx];
-
-        for (uint64_t slot_idx = 0; slot_idx < KVE_NUM_SLOTS; slot_idx++) {
-            if (page->cbo_and_ivs[slot_idx] != UINT64_MAX) {
-                counter++;
-
-                uint64_t cbo = extract_cbo(page->cbo_and_ivs[slot_idx]);
-
-                logfile_get_data(map->logfile, cbo, buffer, 4096);
-
-                printf("[%lu] (%s) (", counter, (char*) (&cmd_buffer->data[cmd_buffer->value_length]));
-
-                uint8_t* value = cmd_buffer->data;
-                size_t val_len = (cmd_buffer->value_length > 100) ? 100 : cmd_buffer->value_length;
-
-                for(int i = 0; i < val_len; i++) {
-                    printf("%hu ", value[i]);
-                }
-                printf(")\n");
-
-            }
-        }
+    rocksdb_iterator_t* iter = rocksdb_create_iterator(map->db, map->read_options);
+    if (!iter) {
+        fprintf(stderr, "kv_store_display_values: failed to create iterator\n");
+        return;
     }
+
+    printf("--- KV Store Contents (RocksDB) ---\n");
+    uint64_t counter = 0;
+    rocksdb_iter_seek_to_first(iter);
+
+    while (rocksdb_iter_valid(iter)) {
+        counter++;
+        size_t key_len;
+        const char* key_data = rocksdb_iter_key(iter, &key_len);
+
+        size_t val_len;
+        const char* val_data = rocksdb_iter_value(iter, &val_len);
+
+        printf("[%lu] Key: %.*s | Value (first ~20 bytes): ",
+               counter,
+               (int)key_len, key_data);
+
+        size_t display_val_len = (val_len > 20) ? 20 : val_len;
+        for (size_t i = 0; i < display_val_len; i++) {
+            // Print as hex or char, depending on expected content
+             if (val_data[i] >= 32 && val_data[i] <= 126) { // Printable ASCII
+                 printf("%c", val_data[i]);
+             } else {
+                 printf("\\x%02x", (unsigned char)val_data[i]);
+             }
+        }
+        if (val_len > 20) printf("...");
+        printf(" (Total Value Length: %zu)\n", val_len);
+
+        rocksdb_iter_next(iter);
+    }
+
+    char* iter_err = NULL;
+    rocksdb_iter_get_error(iter, &iter_err);
+    if (iter_err != NULL) {
+        fprintf(stderr, "kv_store_display_values: iterator error: %s\n", iter_err);
+        free(iter_err);
+    }
+
+    rocksdb_iter_destroy(iter);
+    printf("--- End of KV Store Contents (%lu items) ---\n", counter);
 }

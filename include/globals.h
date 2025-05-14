@@ -17,7 +17,7 @@
 #define MAX_NODES 256
 
 // Size of the command buffer
-#define CMDBUF_SIZE (1 << 24)
+#define CMDBUF_SIZE (1 << 26)
 
 // Key-value store operation
 typedef enum kvs_op_t {
@@ -41,7 +41,6 @@ typedef struct kvs_command_t {
     uint32_t value_length;
     struct sockaddr_in return_addr;
     kvs_op_t type;
-    uint8_t padding[3];
 
     // First stores the binary data (value), then stores the key (null terminated)
     // the key will be padded to 4 bytes
@@ -52,6 +51,7 @@ typedef struct {
     uint64_t term;
     uint64_t log_index;
     size_t cmds_length;
+    uint64_t num_cmds;
     uint8_t* data_to_free;
     kvs_command_t data[];
 } cmd_buffer_t;

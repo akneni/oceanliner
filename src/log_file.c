@@ -16,9 +16,9 @@ size_t kvs_command_len(const kvs_command_t* log_entry) {
 
     size_t length = (
         sizeof(kvs_command_t) +
+        jump_to_alignment((size_t) log_entry->value_length, 4) +
         (size_t) log_entry->key_length +
-        1 + // null terminator 
-        (size_t) log_entry->value_length
+        1 // null terminator 
     );
 
     return jump_to_alignment(length, 8);
@@ -33,6 +33,7 @@ char* kvs_command_get_key(const kvs_command_t* log_entry) {
 
 void kvs_command_get_value(kvs_command_t* log_entry, uint8_t** value) {
     assert(((uint64_t) log_entry) % 8 == 0);
+
     *value = log_entry->data;
 }
 
@@ -54,17 +55,22 @@ bool kvsb_header_validate_checksum(kvsb_header_t* header) {
 
 void logfile_get_data(logfile_t* logfile, uint64_t cmd_offset, uint8_t* out_buffer, size_t length) {
     char* fname = "assets/log-file-example-rand.bin";
+    int32_t res;
 
     FILE* fp = fopen(fname, "r");
 
-    fseek(fp, cmd_offset, 0);
+    res = fseek(fp, cmd_offset, 0);
+    assert(res >= 0);
 
-    fread(out_buffer, 1, length, fp);
+    res = fread(out_buffer, 1, length, fp);
+    assert(res >= 0);
     
-    fclose(fp);
+    res = fclose(fp);
+    assert(res >= 0);
 }
 
 void logfile_append_data(logfile_t* logfile, cmd_buffer_t* cmd_buffer) {
+    int32_t res;
     kvsb_header_t header = {
         .term = cmd_buffer->term,
         .log_index = cmd_buffer->log_index,
@@ -74,10 +80,18 @@ void logfile_append_data(logfile_t* logfile, cmd_buffer_t* cmd_buffer) {
 
     kvsb_header_calc_checksum(&header);
 
-    lseek(logfile->file_fd, 0, SEEK_END);
-    write(logfile->file_fd, &header, sizeof(header));
-    write(logfile->file_fd, cmd_buffer->data, header.data_length);
-    write(logfile->file_fd, &header, sizeof(header));
+    res = lseek(logfile->file_fd, 0, SEEK_END);
+    assert(res >= 0);
+
+    res = write(logfile->file_fd, &header, sizeof(header));
+    assert(res >= 0);
+
+    res = write(logfile->file_fd, cmd_buffer->data, header.data_length);
+    assert(res >= 0);
+
+    res = write(logfile->file_fd, &header, sizeof(header));
+    assert(res >= 0);
+
 }
 
 /// @brief get last term and index
@@ -86,6 +100,8 @@ void logfile_append_data(logfile_t* logfile, cmd_buffer_t* cmd_buffer) {
 /// @param index 
 /// @return 
 void logfile_get_last_tai(logfile_t* logfile, uint64_t* term, uint64_t* index) {
+    int32_t res;
+
     size_t length = logfile_sizeof(logfile);
     if (length < sizeof(logfile_t)) {
         assert(length == 0);
@@ -94,10 +110,13 @@ void logfile_get_last_tai(logfile_t* logfile, uint64_t* term, uint64_t* index) {
         return;
     }
 
-    lseek(logfile->file_fd, -1 * sizeof(kvsb_header_t), SEEK_END);
+    res = lseek(logfile->file_fd, -1 * sizeof(kvsb_header_t), SEEK_END);
+    assert(res >= 0);
 
     kvsb_header_t header;
-    read(logfile->file_fd, &header, sizeof(kvsb_header_t));
+    res = read(logfile->file_fd, &header, sizeof(kvsb_header_t));
+
+    assert(res >= 0);
     assert(kvsb_header_validate_checksum(&header) && "kvsb_header_t checksum validation failed");
 
     *term = header.term;

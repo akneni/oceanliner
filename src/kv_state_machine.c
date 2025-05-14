@@ -38,7 +38,7 @@ int kv_state_machine_apply(void* ctx, const kvs_command_t* cmd, uint8_t** result
             }
             
             // Apply to key-value store
-            apply_result = kv_store_set(kv_store, cmd_byte_offset, key, value, cmd->value_length);
+            // apply_result = kv_store_set(kv_store, cmd_byte_offset, key, value, cmd->value_length);
             break;
         }
         case CMD_DELETE: {
