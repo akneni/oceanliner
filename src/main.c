@@ -13,6 +13,9 @@
 #include <sys/stat.h>
 
 #include <glib.h>
+#include <liburing.h>
+#include <sys/epoll.h>
+
 
 #include "../include/globals.h"
 #include "../include/kv_store.h"
@@ -21,6 +24,8 @@
 #include "../include/log_file.h"
 #include "../include/spsc.h"
 #include "../include/client_ops.h"
+
+#define IOU_QUEUE_LEN 1024
 
 cluster_t cluster_state;
 client_handeling_t clients;
@@ -465,7 +470,7 @@ void* thread_1(void* _) {
     }
 }
 
-void* thread_2(void* _) {
+void* thread_2_old(void* _) {
     size_t buf_size = (CMDBUF_SIZE + sizeof(raft_msg_t));
     raft_msg_t* msg_buffer = (raft_msg_t*) malloc(buf_size);
 
@@ -704,6 +709,269 @@ void* thread_2(void* _) {
     }
 }
 
+void* thread_2(void* _) {
+    size_t buf_size = (CMDBUF_SIZE + sizeof(raft_msg_t));
+    raft_msg_t* msg_buffer = (raft_msg_t*) malloc(buf_size);
+
+    int32_t ep_fd = epoll_create1(0);
+
+    for(int i = 0; i < cluster_state.num_nodes; i++) {
+        if (i == cluster_state.self_id) continue;
+
+
+        struct epoll_event ev;
+        ev.events = EPOLLIN;
+        ev.data.fd = cluster_state.node_fds[i];
+
+        int32_t res = epoll_ctl(ep_fd, EPOLL_CTL_ADD, cluster_state.node_fds[i], &ev);
+        assert(res == 0);
+    }
+
+    struct epoll_event ep_events[32];
+
+    while (true) {
+        int32_t num_events = epoll_wait(ep_fd, ep_events, 32, 25);
+        assert(num_events >= 0);
+
+        if (num_events == 0) {
+            continue;
+        }
+
+        #ifndef NDEBUG
+            printf("[DEBUG - thread_2] received %d events from epoll()\n", num_events);
+        #endif
+        
+        for(int32_t i = 0; i < num_events; i++) {
+            assert(ep_events[i].events & EPOLLIN);
+
+            int64_t bytes_read = read(ep_events[i].data.fd, msg_buffer, buf_size);
+
+            while (msg_buffer->body_length + sizeof(raft_msg_t) > bytes_read) {
+                int64_t bytes_read_curr = read(ep_events[i].data.fd, &((uint8_t*) msg_buffer)[bytes_read], buf_size - bytes_read);
+                assert(bytes_read_curr > 0);
+                bytes_read += bytes_read_curr;
+            }
+
+            assert(msg_buffer->body_length + sizeof(raft_msg_t) == bytes_read);
+            assert(msg_buffer->sender_node_id < MAX_NODES);
+
+            // Handle term
+            pthread_mutex_lock(&raft_state.mutex);
+            if (msg_buffer->term > raft_state.current_term) {
+                #ifndef NDEBUG
+                    printf("[DEBUG - thread_2] received a message from node[id=%lu] with greater term (updating self term)\n", msg_buffer->sender_node_id);
+                #endif
+
+                raft_state.current_term = msg_buffer->term;
+                raft_state.state = RAFT_STATE_FOLLOWER;
+            }
+            else if (msg_buffer->term < raft_state.current_term) {
+                #ifndef NDEBUG
+                    printf("[DEBUG - thread_2] received a message from node[id=%lu] with outdated term\n", msg_buffer->sender_node_id);
+                #endif
+
+                pthread_mutex_unlock(&raft_state.mutex);
+                continue;
+            }
+            pthread_mutex_unlock(&raft_state.mutex);
+
+            // Handle append entries
+            if (msg_buffer->rpc_type == RAFT_RPC_APPEND_ENTRIES) {
+                #ifndef NDEBUG
+                    printf("[DEBUG - thread_2] Received append entries request from node [id=%lu]\n", msg_buffer->sender_node_id);
+                #endif
+                
+
+                raft_append_entries_req_t* ae_req = (raft_append_entries_req_t*) msg_buffer->data;
+
+                pthread_mutex_lock(&raft_state.mutex);
+
+                size_t ae_resp_tsize = sizeof(raft_msg_t) + sizeof(raft_append_entries_resp_t);
+                bool ae_successful = false;
+
+                alignas(8) uint8_t buffer[ae_resp_tsize];
+                raft_msg_t* ae_resp = (raft_msg_t*) buffer;
+                *ae_resp = (raft_msg_t) {
+                    .rpc_type = RAFT_RPC_RESP_APPEND_ENTRIES,
+                    .sender_node_id = cluster_state.self_id,
+                    .term = raft_state.current_term,
+                    .body_length = sizeof(raft_append_entries_resp_t),
+                };
+
+                #ifndef NDEBUG
+                    // Not necessary for functionality, only exists to suppress valgrind warnings
+                    uint8_t n1[4] = {183};
+                    memcpy(ae_resp->padding, &n1, 4);
+                #endif
+
+                bool last_logs_match = (
+                    ae_req->prev_log_term == raft_state.last_applied_term && 
+                    ae_req->prev_log_index == raft_state.last_applied_index
+                );
+                bool is_first_log = (raft_state.last_applied_term == 0) && (raft_state.last_applied_index == 0);
+
+                raft_append_entries_resp_t* aer_data = ((raft_append_entries_resp_t*) ae_resp->data) ;
+                if (last_logs_match || is_first_log) {
+                    *aer_data = (raft_append_entries_resp_t) {
+                        .success = true,
+                        .term = ae_req->prev_log_term,
+                        .log_idx = ae_req->prev_log_index + 1,
+                    };
+                    ae_successful = true;
+                }
+                else {
+                    // Our node is behind, so we cannot commit this. 
+                    printf("[DEBUG - thread_2] received invalid appendEntries() RPC (meaning that this follower is behind)\n");
+
+                    *aer_data = (raft_append_entries_resp_t) {
+                        .success = false,
+                        .log_idx = raft_state.last_applied_index,
+                        .term = raft_state.last_applied_term,
+                    };
+                }
+
+                #ifndef NDEBUG
+                    // Not necessary for functionality, only exists to suppress valgrind warnings
+                    uint8_t n2[7] = {183};
+                    memcpy(aer_data->padding, &n2, 7);
+                #endif
+
+                pthread_mutex_unlock(&raft_state.mutex);
+
+                ssize_t bytes_sent = send(
+                    cluster_state.node_fds[msg_buffer->sender_node_id],
+                    buffer,
+                    ae_resp_tsize,
+                    0
+                );
+
+                if (bytes_sent < 0) {
+                    perror("failed to sent appendEntries() response");
+                    exit(1);
+                }
+                assert(bytes_sent >= 0);
+
+
+                printf("[DEBUG - thread_2] Responded to appendEntries (send_to=node[%lu] success=%hu)\n", msg_buffer->sender_node_id, ae_successful);
+
+                if (!ae_successful) {
+                    continue;
+                }
+
+                cmd_buffer_t* cmd_buffer = ae_req->entries;
+                cmd_buffer->data_to_free = (uint8_t*) msg_buffer;
+
+                // Create a new message buffer (since thread 5 will free the old one)
+                msg_buffer = (raft_msg_t*) malloc(buf_size);
+
+                logfile_append_data(&logfile, cmd_buffer);
+
+                // Not thread 3, but we need 5 to process the set/delete commands
+                spsc_queue_enqueue(&_3_to_5, &cmd_buffer);
+
+                continue;
+            }
+
+            // Handle vote request
+            if (msg_buffer->rpc_type == RAFT_RPC_REQUEST_VOTE) {
+                raft_request_vote_resp_t vote_resp = {
+                    .vote_granted = true,
+                };
+                
+                raft_request_vote_req_t* vote_req = (raft_request_vote_req_t*) msg_buffer->data;
+                                
+                pthread_mutex_lock(&raft_state.mutex);
+
+                if (vote_req->last_log_term < raft_state.last_applied_term) {
+                    vote_resp.vote_granted = false;
+                }
+                else if (vote_req->last_log_term == raft_state.last_applied_term) {
+                    if (vote_req->last_log_index < raft_state.last_applied_index) {
+                        vote_resp.vote_granted = false;
+                    }
+                }
+                
+                size_t size_of_full_resp = sizeof(raft_msg_t) + sizeof(raft_request_vote_resp_t);
+                uint8_t vr_msg_b[size_of_full_resp];
+                raft_msg_t* vr_msg = (raft_msg_t*) vr_msg_b;
+
+                *vr_msg = (raft_msg_t) {
+                    .term = raft_state.current_term,
+                    .body_length = sizeof(raft_append_entries_resp_t),
+                    .rpc_type = RAFT_RPC_RESP_REQUEST_VOTE,
+                    .sender_node_id = cluster_state.self_id,
+                };
+
+                *((raft_request_vote_resp_t*) vr_msg->data) = vote_resp;
+
+                pthread_mutex_unlock(&raft_state.mutex);
+                send(cluster_state.node_fds[msg_buffer->sender_node_id], vr_msg, size_of_full_resp, 0);
+                continue;
+            }
+
+            // Handle append entries resp
+            if (msg_buffer->rpc_type == RAFT_RPC_RESP_APPEND_ENTRIES) {
+                raft_append_entries_resp_t* ae_resp = (raft_append_entries_resp_t*) msg_buffer->data;
+
+                _2_to_3_t block = {
+                    .node_id = msg_buffer->sender_node_id,
+                    .term = ae_resp->term,
+                    .log_index = ae_resp->log_idx,
+                };
+
+                if (ae_resp->success) {
+                    printf(
+                        "[DEBUG - thread_2] received an OK response from an appendEntries() RPC from node[id=%lu]\n", 
+                        msg_buffer->sender_node_id
+                    );
+                    spsc_queue_enqueue(&_2_to_3, &block);
+                }
+                else {
+                    printf(
+                        "[DEBUG - thread_2] received an ERR response from an appendEntries() RPC from node[id=%lu]\n", 
+                        msg_buffer->sender_node_id
+                    );
+                    spsc_queue_enqueue(&_2_to_6, &block);
+                }
+            }
+
+            // Handle vote resp
+            if (msg_buffer->rpc_type == RAFT_RPC_RESP_REQUEST_VOTE) {
+                raft_request_vote_resp_t* v_resp = (raft_request_vote_resp_t*) msg_buffer->data;
+                
+                pthread_mutex_lock(&raft_state.mutex);
+
+                assert(raft_state.state == RAFT_STATE_CANDIDATE);
+                
+                if (raft_state.current_term == msg_buffer->term) {
+                    if (v_resp->vote_granted) {
+                        raft_state.votes_received++;
+                    }
+                } else {
+                    printf("unrechable!()\n");
+                }
+
+                if (raft_state.votes_received > cluster_state.num_nodes / 2) {
+                    pthread_mutex_unlock(&raft_state.mutex);
+                    raft_become_leader(&raft_state);
+                }
+                else {
+                    // We need to repeat pthread_mutex_unlock() to ensure that raft_state.votes_received is compared 
+                    // while we hold the lock
+                    pthread_mutex_unlock(&raft_state.mutex);
+                }
+                continue;
+            }
+
+        }
+
+        
+
+        
+    }
+}
+
+
 void* thread_3(void* _) {
     while (true) {
         _1_to_3_t cmd_buffers;
@@ -813,7 +1081,7 @@ void* thread_3(void* _) {
     }
 }
 
-void* thread_4(void* _) {
+void* thread_4_old(void* _) {
     // Handles commiting GET operations to the kv_store
 
     while (true) {
@@ -871,11 +1139,106 @@ void* thread_4(void* _) {
             // Send Message
             resp_to_client(clients.clinet_socket_send, &cmd->return_addr, cr);
 
-            char ip[128];
-            inet_ntop(AF_INET, &cmd->return_addr.sin_addr, ip, 128);
+            cmd = (kvs_command_t*) &((uint8_t*) cmd)[length];
+            total_length_processed += length;
+        }
+
+        free(cmd_buffer->data_to_free);
+    }
+    
+}
+
+void* thread_4(void* _) {
+    // Handles commiting GET operations to the kv_store
+
+    struct io_uring ring;
+    io_uring_queue_init(IOU_QUEUE_LEN, &ring, 0);
+
+
+
+    
+    while (true) {
+        cmd_buffer_t* cmd_buffer = NULL;
+        int32_t res = spsc_queue_dequeue(&_3_to_4, &cmd_buffer);
+        if (res != 0) {
+            sleep_milisec(5);
+            continue;
+        }
+
+        kvs_command_t* cmd = cmd_buffer->data;
+
+        size_t total_length_processed = 0;
+        uint64_t num_ring_added = 0;
+        uint8_t* data_ptrs[IOU_QUEUE_LEN];
+
+        while (total_length_processed < cmd_buffer->cmds_length) {
+            struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+
+            assert(sqe != NULL);
+
+            
+
+            size_t length = kvs_command_len(cmd);
+            alignas(8) uint8_t value[1 << 12];
+
+            assert(total_length_processed % 8 == 0);
+            assert(cmd->value_length + sizeof(client_resp_t) <= (1 << 12));
+
+            client_resp_t* cr = (client_resp_t*) value;
+            
+
+            char* key = kvs_command_get_key(cmd);
+            
+            int64_t value_length = INT64_MAX;
+            uint8_t* data = kv_store_get(&disk_map, key, &value_length);
+            assert(value_length < MAX_VAL_LEN);
+
+
+            if (data == NULL) {
+                *cr = (client_resp_t) {
+                    .body_length = 0,
+                    .status_code = 201,
+                    .op_type = CMD_GET,
+                };
+                value_length = 0;
+            }
+            else {
+                char string[128] = {0};
+                memcpy(string, data, value_length);
+
+                assert(value_length < MAX_VAL_LEN || value_length > 0);
+                *cr = (client_resp_t) {
+                    .body_length = value_length,
+                    .status_code = 200,
+                    .op_type = CMD_GET,
+                };
+                memcpy(cr->data, data, value_length);
+            }
+
+            // free(data);
+
+            assert(num_ring_added < IOU_QUEUE_LEN);
+            data_ptrs[num_ring_added] = data;
+            
+            // Send Message
+            // resp_to_client(clients.clinet_socket_send, &cmd->return_addr, cr);
+            resp_to_client_uring(clients.clinet_socket_send, &cmd->return_addr, cr, sqe);
 
             cmd = (kvs_command_t*) &((uint8_t*) cmd)[length];
             total_length_processed += length;
+            num_ring_added++;
+
+            if (num_ring_added == IOU_QUEUE_LEN || total_length_processed == cmd_buffer->cmds_length) {
+                // send requests
+
+                io_uring_submit(&ring);
+
+                for(int i = 0; i < num_ring_added; i++) {
+                    free(data_ptrs[i]);
+                }
+
+                num_ring_added = 0;
+            }
         }
 
         free(cmd_buffer->data_to_free);
@@ -946,10 +1309,102 @@ void* thread_5(void* _) {
                     .op_type=cmd->type,
                 };
     
-                char ip[128];
-                inet_ntop(AF_INET, &cmd->return_addr.sin_addr, ip, 128);
-    
                 resp_to_client(clients.clinet_socket_send, &cmd->return_addr, cresp);
+            }
+
+            cmd = (kvs_command_t*) &((uint8_t*) cmd)[length];
+            total_length_processed += length;
+
+        }
+        assert(total_length_processed == cmd_buffer->cmds_length);
+        free(cmd_buffer->data_to_free);
+    }
+}
+
+void* thread_5_new(void* _) {
+    // Handles commiting SET & DELETE operations to the kv_store
+
+    while (true) {
+        cmd_buffer_t* cmd_buffer = NULL;
+
+        int32_t res = spsc_queue_dequeue(&_3_to_5, &cmd_buffer);
+        if (res != 0) {
+            sleep_milisec(5);
+            continue;
+        }
+
+        assert(cmd_buffer != NULL);
+        assert(cmd_buffer->cmds_length <= CMDBUF_SIZE);
+
+        struct io_uring ring;
+        res = io_uring_queue_init(IOU_QUEUE_LEN, &ring, 0);
+        assert(res >= 0);
+
+        // Size of the log file before this batch
+        kvs_command_t* cmd = cmd_buffer->data;
+
+        size_t total_length_processed = 0;
+        uint64_t num_ring_added = 0;
+        client_resp_t responses_buffer[IOU_QUEUE_LEN];
+
+        printf("[DEBUG - thread_5] cmd_buffer->cmds_length = %lu\n", cmd_buffer->cmds_length);
+
+        while (total_length_processed < cmd_buffer->cmds_length) {
+            assert(cmd->value_length < MAX_VAL_LEN);
+            assert(cmd->value_length < CMDBUF_SIZE);
+
+            assert((cmd_buffer->cmds_length - total_length_processed) >= sizeof(kvs_command_t));
+
+            size_t length = kvs_command_len(cmd);
+            char* key = kvs_command_get_key(cmd);
+
+            if (cmd->type == CMD_DELETE) {
+                kv_store_delete(&disk_map, key);
+            }
+            else if (cmd->type == CMD_SET) {
+                uint8_t* value = NULL;
+                kvs_command_get_value(cmd, &value);
+
+                assert(value != NULL);
+
+                char string[128] = {0};
+                memcpy(string, value, cmd->value_length);
+                kv_store_set(&disk_map, key, value, cmd->value_length);
+            }
+            else {
+                printf("FOUND CMD TYPE [%d] in thread_5\n", cmd->type);
+                exit(1);
+            }
+
+            pthread_mutex_lock(&raft_state.mutex);
+            raft_state_t state = raft_state.state;
+            pthread_mutex_unlock(&raft_state.mutex);
+
+            // Returns success to the client. (only do so if leader)
+            if (state == RAFT_STATE_LEADER) {
+                struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
+
+                assert(num_ring_added < IOU_QUEUE_LEN);
+
+                responses_buffer[num_ring_added] = (client_resp_t) {
+                    .body_length=0,
+                    .status_code=200,
+                    .op_type=cmd->type,
+                };
+
+                resp_to_client_uring(clients.clinet_socket_send, &cmd->return_addr, &responses_buffer[num_ring_added], sqe);
+                num_ring_added++;
+
+                if (num_ring_added == IOU_QUEUE_LEN || total_length_processed == cmd_buffer->cmds_length) {
+                    // send requests
+
+                    res = io_uring_submit(&ring);
+                    num_ring_added = 0;
+
+                    assert(res >= 0);
+                    printf("[DEBUG - thread_5] sent client responses\n");
+                }
+
             }
 
             cmd = (kvs_command_t*) &((uint8_t*) cmd)[length];
@@ -964,9 +1419,8 @@ void* thread_5(void* _) {
 void* thread_6(void* _) {
     while (true) {
         // TODO: implement this
-        sleep_milisec(10000);
-    }
-    
+        sleep_milisec(100000);
+    }   
 }
 
 void* thread_7(void* _) {
@@ -974,23 +1428,23 @@ void* thread_7(void* _) {
     while (true) {
         sleep_milisec(75);
 
-        // pthread_mutex_lock(&raft_state.mutex);
-        // raft_node_t rf_srate = raft_state;
-        // pthread_mutex_unlock(&raft_state.mutex);
+        pthread_mutex_lock(&raft_state.mutex);
+        raft_node_t rf_srate = raft_state;
+        pthread_mutex_unlock(&raft_state.mutex);
 
-        // if (rf_srate.state == RAFT_STATE_LEADER) {
-        //     raft_msg_t msg = {
-        //         .sender_node_id = cluster_state.self_id,
-        //         .body_length = 0,
-        //         .rpc_type = RAFT_HEARTBEAT,
-        //         .term = rf_srate.current_term,
-        //     };
+        if (rf_srate.state == RAFT_STATE_LEADER) {
+            raft_msg_t msg = {
+                .sender_node_id = cluster_state.self_id,
+                .body_length = 0,
+                .rpc_type = RAFT_HEARTBEAT,
+                .term = rf_srate.current_term,
+            };
 
-        //     for(int i = 0; i < cluster_state.num_nodes; i++) {
-        //         if (i == cluster_state.self_id) continue;
-        //         send(cluster_state.node_fds[i], &msg, sizeof(msg), 0);
-        //     }
-        // }
+            for(int i = 0; i < cluster_state.num_nodes; i++) {
+                if (i == cluster_state.self_id) continue;
+                send(cluster_state.node_fds[i], &msg, sizeof(msg), 0);
+            }
+        }
     }
 }
 

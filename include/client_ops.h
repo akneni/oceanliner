@@ -19,5 +19,6 @@ typedef struct {
 } client_resp_t;
 
 void resp_to_client(int32_t fd, struct sockaddr_in* addr, client_resp_t* msg);
+void resp_to_client_uring(int32_t fd, struct sockaddr_in* addr, client_resp_t* msg, struct io_uring_sqe* sqe);
 
 #endif // CLIENT_OPS_H
